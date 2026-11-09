@@ -1,0 +1,30 @@
+# ===== 构建产物 / 安装包（体积大，不入库）=====
+/build/
+/out/
+*.apk
+*.apks
+*.deflate
+*.zip
+
+# ===== 本机工具链与依赖缓存（可在本机重新准备，不入库）=====
+/sdk/
+/dl/
+/node_modules/
+/.npm-cache/
+*.jar
+
+# ===== 模型权重（单个文件最大 166 MB，超过 GitHub 100 MB 单文件硬限制）=====
+# 需要用 Git LFS 或 GitHub Release 单独分发
+*.onnx
+*.task
+*.parquet
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
