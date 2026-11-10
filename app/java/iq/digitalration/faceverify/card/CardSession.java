@@ -64,9 +64,20 @@ public final class CardSession {
 
     /** 选 EF 并读完整个文件（按 TLV 头里的长度分块）。文件不存在返回 null。 */
     public byte[] readFile(int fid) throws Exception {
+        return readFile(fid, false);
+    }
+
+    /**
+     * @param optional true 时把"选择文件被拒"也当"文件不可用"返回 null（6A82/6A88/6D00/6982）。
+     *                 只用于探测 EF.CardAccess：不少不支持 PACE 的芯片用 **6982（安全状态不满足）**
+     *                 而不是 6A82 回绝这个文件，真实现场就是这么回的。
+     */
+    public byte[] readFile(int fid, boolean optional) throws Exception {
         Apdu.Resp r = send(0xA4, 0x02, 0x0C, new byte[]{(byte) (fid >> 8), (byte) fid}, null);
         if (!r.ok()) {
-            if (r.sw == 0x6A82 || r.sw == 0x6A88) return null;
+            boolean unavailable = r.sw == 0x6A82 || r.sw == 0x6A88
+                    || (optional && (r.sw == 0x6D00 || r.sw == 0x6982));
+            if (unavailable) return null;
             throw new IllegalStateException(String.format("选择 EF %04X 失败：%s", fid, r.describe()));
         }
         Apdu.Resp head = send(0xB0, 0x00, 0x00, null, 4);

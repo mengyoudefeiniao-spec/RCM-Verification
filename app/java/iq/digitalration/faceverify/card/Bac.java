@@ -20,7 +20,9 @@ public final class Bac {
 
         Apdu.Resp r = session.send(0x84, 0x00, 0x00, null, 8);
         if (!r.ok() || r.data.length != 8) {
-            throw new IllegalStateException("BAC 取挑战失败：" + r.describe());
+            throw new IllegalStateException("BAC 取挑战失败：" + r.describe()
+                    + (r.sw == 0x6982 || r.sw == 0x6A81
+                    ? "（芯片拒绝 BAC：这张卡可能只支持 PACE）" : ""));
         }
         byte[] rndIc = r.data;
         byte[] rndIfd = Crypt.random(8);
@@ -32,8 +34,11 @@ public final class Bac {
 
         r = session.send(0x82, 0x00, 0x00, Crypt.concat(eIfd, mIfd), 0x28);
         if (!r.ok() || r.data.length != 40) {
-            throw new IllegalStateException("BAC 外部认证失败：" + r.describe()
-                    + (r.sw == 0x6300 ? "（MRZ 不正确）" : ""));
+            String hint = r.sw == 0x6300 ? "（MRZ 不正确：证件号/出生/有效期必须与卡面完全一致）"
+                    : (r.sw == 0x6982 || r.sw == 0x6A81)
+                    ? "（芯片拒绝 BAC：这张卡可能只支持 PACE，而 EF.CardAccess 又被保护，需要预置 PACE 参数）"
+                    : "";
+            throw new IllegalStateException("BAC 外部认证失败：" + r.describe() + hint);
         }
         byte[] cipher = new byte[32];
         byte[] mac = new byte[8];

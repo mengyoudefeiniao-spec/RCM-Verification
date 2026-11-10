@@ -52,6 +52,35 @@ public class OcrTest {
         System.out.println("MRZ 校验: doc=" + cf.checkDocOk + " dob=" + cf.checkDobOk + " exp=" + cf.checkExpiryOk
                 + " composite=" + cf.checkCompositeOk);
         System.out.println(cf.summary());
+
+        // ---- 小卡片：卡只占画面一小块（现场最常见），验证 recognizeCard 的下半部放大补扫 ----
+        System.out.println();
+        System.out.println("=== small card (1280x960, card width 300px) ===");
+        BufferedImage card = ImageIO.read(new File(img));
+        int cw0 = 300;
+        int ch0 = Math.max(1, Math.round(card.getHeight() * cw0 / (float) card.getWidth()));
+        BufferedImage canvas = new BufferedImage(1280, 960, BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = canvas.createGraphics();
+        g.setColor(new java.awt.Color(0x1A1A2E));
+        g.fillRect(0, 0, 1280, 960);
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.drawImage(card, (1280 - cw0) / 2, (960 - ch0) / 2, cw0, ch0, null);
+        g.dispose();
+        int[] big = new int[1280 * 960];
+        canvas.getRGB(0, 0, 1280, 960, big, 0, 1280);
+
+        long t1 = System.currentTimeMillis();
+        CardFields auto = CardFields.parse(core.recognizeAuto(big, 1280, 960).lines);
+        long tAuto = System.currentTimeMillis() - t1;
+        long t2 = System.currentTimeMillis();
+        CardFields zoom = CardFields.parse(core.recognizeCard(big, 1280, 960).lines);
+        long tZoom = System.currentTimeMillis() - t2;
+        System.out.printf("  auto: family=%s mrzUsable=%s doc=%s (%dms)%n",
+                auto.familyNo, auto.mrzUsable(), auto.docNumber, tAuto);
+        System.out.printf("  card: family=%s mrzUsable=%s doc=%s (%dms)%n",
+                zoom.familyNo, zoom.mrzUsable(), zoom.docNumber, tZoom);
+        System.out.println("  " + zoom.summary());
         core.close();
     }
 }

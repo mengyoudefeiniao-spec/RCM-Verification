@@ -197,14 +197,14 @@ public class MainActivity extends Activity {
         selftest.setOnClickListener(v -> runSelfTest());
         root.addView(selftest, fullWidth());
 
-        // ---- 现场验证 ----
-        root.addView(stepTitle("④ 现场验证清单"));
-        Button checklist = new Button(this);
-        checklist.setText("现场验证清单（证据汇总 + 报告导出）");
-        checklist.setTextSize(14);
-        checklist.setAllCaps(false);
-        checklist.setOnClickListener(v -> startActivity(new Intent(this, ChecklistActivity.class)));
-        root.addView(checklist, fullWidth());
+        // ---- 技术验证实验室 ----
+        root.addView(stepTitle("④ 技术验证实验室"));
+        Button lab = new Button(this);
+        lab.setText("技术验证实验室（逐条自测 + 报告导出）");
+        lab.setTextSize(14);
+        lab.setAllCaps(false);
+        lab.setOnClickListener(v -> startActivity(new Intent(this, LabActivity.class)));
+        root.addView(lab, fullWidth());
 
         // ---- 参数 ----
         root.addView(stepTitle("参数"));

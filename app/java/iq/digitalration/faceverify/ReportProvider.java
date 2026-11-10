@@ -18,7 +18,7 @@ import java.util.Locale;
  *
  * <p>本工程没有 androidx，用不了 FileProvider，而 targetSdk 33 下 {@code file://} 会直接抛
  * FileUriExposedException，所以这里最小实现一个：authority 是
- * {@code <包名>.reports}，只暴露 checklist-export 目录下的 .zip，且只读。
+ * {@code <包名>.reports}，只暴露 lab-export 目录下的 .zip，且只读。
  *
  * <p>注意：manifest 里的 {@code android:authorities} 由 tools/build.ps1 按实际包名重写
  * （标准版/精简版包名不同，authority 也必须不同，否则两个包不能共存）。
@@ -47,12 +47,13 @@ public class ReportProvider extends ContentProvider {
         if (ctx == null) throw new FileNotFoundException("no context");
         String name = uri.getLastPathSegment();
         if (name == null) throw new FileNotFoundException("empty name");
-        // 只允许导出目录里的 zip，避免变成任意文件读取
+        // 只允许导出目录里的 zip / txt（读卡日志），避免变成任意文件读取
         String lower = name.toLowerCase(Locale.US);
-        if (!lower.endsWith(".zip") || name.contains("/") || name.contains("..")) {
+        boolean allowed = lower.endsWith(".zip") || lower.endsWith(".txt");
+        if (!allowed || name.contains("/") || name.contains("..")) {
             throw new FileNotFoundException("not a report: " + name);
         }
-        File dir = ChecklistStore.exportDir(ctx);
+        File dir = LabStore.exportDir(ctx);
         File f = new File(dir, name);
         if (!f.isFile()) throw new FileNotFoundException("missing: " + name);
         return f;
@@ -67,6 +68,8 @@ public class ReportProvider extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
+        String name = uri == null ? null : uri.getLastPathSegment();
+        if (name != null && name.toLowerCase(Locale.US).endsWith(".txt")) return "text/plain";
         return "application/zip";
     }
 

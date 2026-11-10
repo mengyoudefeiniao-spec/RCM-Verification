@@ -117,6 +117,22 @@ public class JvmTest {
         // 先把它推到转头（若首个不是，则先完成眨眼等）——这里直接测"单帧高值不触发"
         lv5.update(sensor(true, 0, 0.9f, 0.9f, 0.9f), t5 += 100);
         System.out.printf("  (e) 首帧全高值(%s)：done=%d（多帧要求生效则应为 0）%n", first, lv5.state().done);
+
+        // (g) 峰值口径：动作峰值只在**该动作进行期间**累计。
+        //     首动作不是转头时，即使画面 yaw 到 0.90（侧脸/转头），"转头"峰值仍应是 0；
+        //     而全程 maxYaw 会照实记 0.90 —— 这正是旧界面"没让转头却显示转头 0.04"的来源。
+        Liveness lg = null;
+        for (long seed = 1; seed < 1000; seed++) {
+            Liveness cand = new Liveness(seed);
+            if (cand.currentTask() != Liveness.Task.TURN) { lg = cand; break; }
+        }
+        if (lg != null) {
+            lg.update(sensor(true, 0.05f, 0.90f, 0.02f, 0.02f), 1000);
+            System.out.printf("  (g) turnPeak=%.2f maxYaw=%.2f%n",
+                    lg.state().turnPeak, lg.state().maxYaw);
+        } else {
+            System.out.println("  (g) 找不到非转头开头的种子");
+        }
     }
 
     /** 用户眨不了眼（低帧率抓不到）：连续超时后应自动换动作，最终仍能通过。 */

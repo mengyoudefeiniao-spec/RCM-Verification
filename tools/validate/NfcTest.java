@@ -54,6 +54,26 @@ public class NfcTest {
         check("Kenc", Tlv.hex(kEnc).equals("AB94FDECF2674FDFB9B391F85D7F76F2"), Tlv.hex(kEnc));
         check("Kmac", Tlv.hex(kMac).equals("7962D9ECE03D1ACD4C76089DCE131543"), Tlv.hex(kMac));
 
+        System.out.println("=== 1b. 可选文件（EF.CardAccess）的拒绝码语义 ===");
+        // 现场实测：伊拉克 eMRTD 对 SELECT EF.CardAccess(011C) 回 6982（安全状态不满足），
+        // 不是 6A82。这一码必须当"芯片不开放该文件"，否则界面会把 PACE 探测显示成"读卡失败"。
+        check("SELECT 6982 → 视为不可用（不抛异常）",
+                new CardSession(cmd -> new byte[]{(byte) 0x69, (byte) 0x82}).readFile(0x011C, true) == null,
+                "6982");
+        check("SELECT 6A82 → 视为不存在",
+                new CardSession(cmd -> new byte[]{(byte) 0x6A, (byte) 0x82}).readFile(0x011C, true) == null,
+                "6A82");
+        check("SELECT 6D00 → 视为不支持",
+                new CardSession(cmd -> new byte[]{(byte) 0x6D, (byte) 0x00}).readFile(0x011C, true) == null,
+                "6D00");
+        boolean strictThrew = false;
+        try {
+            new CardSession(cmd -> new byte[]{(byte) 0x6A, (byte) 0x86}).readFile(0x011C, true);
+        } catch (IllegalStateException e) {
+            strictThrew = true;
+        }
+        check("SELECT 6A86 → 仍抛异常（真错误不吞）", strictThrew, "6A86");
+
         System.out.println("=== 2. AES-CMAC（RFC 4493）===");
         byte[] ck = Tlv.unhex("2b7e151628aed2a6abf7158809cf4f3c");
         check("空消息", Tlv.hex(Crypt.aesCmac(ck, new byte[0], 16)).equals("BB1D6929E95937287FA37D129B756746"),
@@ -204,7 +224,11 @@ public class NfcTest {
         private Ec.Point termMapPub, mappedG, termKaPub, chipKaPub;
         private byte[] ksEnc, ksMac;
 
+        /** true = 只支持 PACE（对 BAC 的 GET CHALLENGE 返回 6A81），用来测"BAC 失败后回退 PACE"。 */
+        private final boolean paceOnly;
+
         VirtualCard(String dir, boolean usePace) throws Exception {
+            this.paceOnly = usePace;
             files.put(0x0101, Files.readAllBytes(Paths.get(dir, "dg1.bin")));
             files.put(0x0102, Files.readAllBytes(Paths.get(dir, "dg2.bin")));
             files.put(0x010B, Files.readAllBytes(Paths.get(dir, "dg11.bin")));
@@ -283,9 +307,13 @@ public class NfcTest {
                     return new Resp(out, 0x9000);
                 }
                 case 0x84:
+                    // 只支持 PACE 的卡（usePace=true）不给 BAC 挑战：这样测试 7 才能真正验证
+                    // 「BAC 先试 → 被拒 → 读 EF.CardAccess → 走 PACE」这条回退链路
+                    if (paceOnly) return new Resp(new byte[0], 0x6A81);
                     rndIc = Crypt.random(8);
                     return new Resp(rndIc, 0x9000);
                 case 0x82:
+                    if (paceOnly) return new Resp(new byte[0], 0x6A81);
                     return bacExternalAuth(c.data);
                 case 0x22:
                     return paceMse(c.data);

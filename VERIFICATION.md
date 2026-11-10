@@ -609,12 +609,750 @@ E: provider  name="...ReportProvider"     exported=false
 **未验证**：清单页在真机上的交互（对话框、结论按钮、分享面板里能否选到 WhatsApp 并带上 ZIP）、
 定制 ROM 上 `getInstallSourceInfo` / 签名读取的返回值、接收端打开 ZIP 的效果。以上只能上机确认。
 
+## 16. 技术验证实验室（v2.5 / versionCode 15）
+
+把 v2.4 的「现场验证清单」换成一页**能真跑自测**的实验室：不再只是汇总已有证据，而是按 TV 条目
+逐项在本机执行（`LabActivity` + `LabReport` + `LabStore`），结果落 `files/lab/lab.json` 并可导出。
+
+### 16.1 这一版顺手修掉的编译错误
+
+`BioAuth.java`（TV-05）里 `prompt.authenticate(CryptoObject, Executor, Callback)` **不存在**：
+API 28 起带 CryptoObject 的重载必须带 `CancellationSignal`，之前这一版整个工程是编不过的。
+
+```
+BioAuth.java:89: 错误: 不兼容的类型: CryptoObject无法转换为CancellationSignal
+```
+
+改成 `authenticate(new BiometricPrompt.CryptoObject(sig), new CancellationSignal(), a.getMainExecutor(), cb)`。
+
+### 16.2 构建（真实输出）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build.ps1
+```
+
+```
+[4/7] javac
+[5/7] d8        dex: classes.dex 4.84MB
+[7/7] align + sign
+OK -> out\FaceVerify-offline.apk  (225.4 MB)  model=r50 abi=arm64
+     appId=iq.digitalration.faceverify  label=离线人脸核验 R50  version=2.5-lab-r50/15
+
+powershell -File tools\build.ps1 -Model mbf
+OK -> out\FaceVerify-lite.apk  (72.1 MB)  model=mbf abi=arm64
+     appId=iq.digitalration.faceverify.lite  label=离线人脸核验 Lite  version=2.5-lab-lite/15
+```
+
+APK 清单反查（`aapt2 dump xmltree`）：
+
+```
+versionCode=15  versionName="2.5-lab-r50"
+activity name="...LabActivity"          （ChecklistActivity 已移除）
+provider name="...ReportProvider"  authorities="iq.digitalration.faceverify.reports"
+```
+
+### 16.3 回归（`tools\test.ps1`，真实输出）
+
+```
+OCR UNIT TESTS PASSED (15)
+NFC TESTS PASSED (45)
+=== 被引用但不存在的类 ===  无
+加载成功 3886 个，失败 0 个（共 3886）
+ALL CLASSES LOADABLE
+dex 类 4035 个 / 应包含 3886 个 / 缺失 0 个
+ALL JVM TESTS PASSED
+```
+
+（类数从上版的 3878 增到 3886，是 Lab 与各 TV 模块新增的类；三张合成卡背图仍是户号 0.9998、MRZ 三项校验全过。）
+
+### 16.4 实验室里每一项跑的是什么
+
+| 条目 | 入口 | 断言 |
+|---|---|---|
+| TV-21 / TV-30 | `DeviceInfo.collect` | 只采集（机型 / 系统 / ABI / 内存 / 存储 / 相机 / NFC / 签名 / 权限） |
+| TV-04 | `IntegrityProbe.collect` | 只采集 + 明确报"云端判决不可用（无 INTERNET 权限）" |
+| TV-11 | `Receipt.tamperTest` | 正常回执过；改 payload / 改时间 / 改计数器必须被拒 |
+| TV-05 | `BioAuth` | 未认证签名必须 `UserNotAuthenticated`；真认证一次拿到可验签令牌 |
+| TV-08 | `DynamicCode.selfTest(30)` | 正确码 / 重放 / 过期 / 未来 / 篡改 五项全对 |
+| TV-09 | `RosterStore.runFullTest(1500)` | 导入 ≤30s、查询 p95 ≤100ms、主文件写坏回退 `.bak`、半截 `.tmp` 不生效 |
+| TV-10 | `OfflineQueue.runFullTest(300)` | 重复 0 条、pending 0 条、冲突 3 单、记录本地单条同步开销（网络时延现场测） |
+
+### 16.5 仍未验证
+
+- **实验室页没有上过真机**：抽屉/滚动布局、生物识别弹窗、`ACTION_SEND` 分享面板能否选到 WhatsApp、
+  1,500 户导入在手机上的真实耗时，全部只能装机确认。
+- 各 TV 自测的**手机端数字**还没有（TV-09 的 p95、TV-10 的 avgSyncUs、TV-05 的认证耗时）。
+  这些正是装 APK 后点一下就能得到的，导出 ZIP 即可。
+- `Play Integrity` 云端判决不可用（本包无网络权限），只给本地证据（签名/KeyStore 等级/Root 迹象）。
+
+## 17. 实验室真机首测（2.5-lab-lite）与三处修复（2.6 / versionCode 16）
+
+用户装 `FaceVerify-lite.apk`（2.5-lab-lite / 15）后跑完整实验室并回传报告：
+`faceverify-lab-20261110-101734.zip`（设备 Xiaomi 25102RKBEC / Redmi / Android 16 / sdk 36 / arm64-v8a，
+包名 `iq.digitalration.faceverify.lite`，权限只有 CAMERA + NFC，无 INTERNET）。
+
+### 17.1 首测结果（全部为本机真实数字）
+
+| 条目 | 结论 | 关键数字 |
+|---|---|---|
+| TV-21 / TV-30 设备环境 | 已采集 | Redmi 25102RKBEC · Android 16 · 8 核 · 15.7 GB · NFC 可用 · 相机 2 |
+| TV-04 端侧可信性 | 已采集 | root=false · emulator=false · GMS 26.04.38 已装 · **deviceKey.exists=false** |
+| TV-11 回执与防篡改 | **未通过** | cleanPass=true · payload/time 篡改被拒 · **counterTamperRejected=false** |
+| TV-05 生物识别登录 | **未通过** | **SecurityException: 缺 USE_BIOMETRIC 权限** · 强制拦截=已生效 |
+| TV-08 动态码 | 通过 | 30 轮 × 5 项全对（4786 ms） |
+| TV-09 花名册 | **未通过** | 导入 328 ms · p95 0.94 µs · **corruptFallback=none** |
+| TV-10 离线队列 | 通过 | 300 条 · 重复 0 · pending 0 · 冲突 3 · **avgSyncUs=0（测法无效）** |
+
+### 17.2 三个失败的根因（都是我自己写错，不是能力不足）
+
+**① TV-11 counterTamperRejected=false —— 测试把自己判成失败**
+`Receipt.tamperTest` 里把计数器写死成 `put("counter", 1)`。全新安装后**第一次签发的计数器本来就是 1**，
+等于什么都没改，验签当然通过。改成 `counter + 1000`，并补一项"原样重放必须被判为旧回执"。
+
+**② TV-05 SecurityException —— 清单里少了 USE_BIOMETRIC 权限**
+`BiometricPrompt.authenticate()` 在 API 28+ 要求 `android.permission.USE_BIOMETRIC`（普通权限，安装即授予），
+`AndroidManifest.xml` 里没声明 → 直接抛异常，用户当然看不到指纹/人脸弹窗。
+已补 `USE_BIOMETRIC`（+ `USE_FINGERPRINT` maxSdkVersion=27 给 API 24—27 的锁屏确认路径）。
+APK 反查：
+```
+uses-permission: name='android.permission.USE_BIOMETRIC'
+uses-permission: name='android.permission.USE_FINGERPRINT' maxSdkVersion='27'
+```
+
+**③ TV-09 corruptFallback=none —— 两个 bug 叠在一起**
+1. **没有 .bak 可回退**：首次导入时主库还不存在，`importCsv` 不会生成 `.bak`，所以"写坏主文件"后无处可退。
+   自测现在导入**两次**（模拟首次下发 + 版本切换），第二次才会把旧库转成 `.bak`。
+2. **校验和存在 SharedPreferences 里，回退必然失败**：`tryLoad` 拿"当前版本"的 checksum 去校验 `.bak`（旧版本），
+   永远对不上 → 直接把 `.bak` 也判成损坏。改为**校验和写在密文内容里**（`payload.checksum`，覆盖 rows），
+   跟着版本走；文件完整性本身已由 AES-GCM tag 保证。
+
+**附带修掉的两处"测了但没测到"**
+- TV-10 `avgSyncUs=0`：原来只对 `put("state")` 计时（纳秒级 → 0）。现在测真实工作量：
+  状态迁移 + 记录序列化 + 每轮 `save()`（fsync）摊销，并给出 `avgSyncWithDiskUs` / `saveMsTotal`；
+  `syncFastEnough` 也从"恒为 true"改为真实判定（≤500 ms）。
+- TV-04 `deviceKey.exists=false`、`hardwareAttested=false`、`keystoreLevel=unknown`：因为 `describe()` 只看不生成。
+  改为先 `ensureSigningKey()`（带 attestation challenge）再描述，下次就能拿到证书链与 TEE 等级。
+
+### 17.3 修复后重新构建（真实输出）
+
+```
+powershell -File tools\build.ps1 -Model mbf
+OK -> out\FaceVerify-lite.apk     (72.1 MB)  version=2.6-lab-lite/16
+
+powershell -File tools\build.ps1
+OK -> out\FaceVerify-offline.apk  (225.4 MB)  version=2.6-lab-r50/16
+```
+
+JVM 回归不变：`OCR 15 项 / NFC 45 项 / 缺失类 无 / 3886 个类全加载 / dex 缺失 0 / ALL JVM TESTS PASSED`。
+
+### 17.4 还需要再上机复核的
+
+这三项**修完还没上机**，判据是重装 `2.6-lab-lite` 后实验室页重跑，期望：
+
+| 条目 | 期望 |
+|---|---|
+| TV-11 | `counterTamperRejected=true` · `replayDetected=true` · 结论通过 |
+| TV-05 | 点「生物识别登录」弹出系统指纹/人脸 → 令牌签名并验签通过；`enforcement.blocked=true` → 结论通过 |
+| TV-09 | `households=1500` · `coldImportMs≈300ms` · `versionUpgradeMs≈300ms` · `hasBackup=true` · `corruptFallback=backup` · 结论通过 |
+| TV-10 | `avgSyncWithDiskUs` 有真实数值（非 0），仍应远小于 500 ms |
+| TV-04 | `deviceKey.exists=true`，`keystoreLevel` 应为 TEE 或 StrongBox，`hardwareBackedKey` 视机型 |
+
+## 18. v2.7：三处可视化（动态码二维码 / 人脸登录 / 花名册查看）
+
+真机 2.6 报告（`faceverify-lab-20261110-103416.zip`，Redmi 25102RKBEC / Android 16）7 项全部通过：
+TV-04 `hardwareBackedKey=true`、`keystoreLevel=TEE`；TV-11 五项全对；TV-05 强认证 1796ms 且未认证被拦；
+TV-08 30 轮全对；TV-09 `hasBackup=true`、`corruptFallback=backup`；TV-10 `avgSyncWithDiskUs=74µs`。
+在这一版基础上补三个"看得见"的东西。
+
+### 18.1 60 秒动态码：自己写二维码，且证明它是对的
+
+工程不许联网、也不引第三方库，所以按 ISO/IEC 18004 手写 `QrCode`（Byte 模式 / M 级 / 版本 1—6 / 8 个掩码按罚分择优）。
+二维码内容 `RCM1|设备号|窗口号|8位码`（40 字节，落在版本 3）。
+
+正确性不是"看着像"，`tools/validate/QrTest.java` 做了三件独立的事：
+
+```
+=== 离线二维码（自研编码器 + 独立解码校验）===
+QR TESTS PASSED (46)
+```
+
+- **独立解码器**：另写一套读矩阵的代码（格式信息两份都读并要求一致 → 去掩码 → 之字形取码 → 反交织 → 解析 Byte 模式），
+  把字符串读回来逐字节比对；覆盖 1 / 14 / 26 / 42 / 62 / 84 / 106 字节与真实动态码 payload；
+- **RS 独立校验**：用另一套 GF(256)（exp/log 表）算校验子 S_j = c(α^j)，j=0…ecLen-1 必须全零
+  （这里踩过一次坑：QR 的生成多项式根是 α^0 起，不是 α^1 起，写成 1..ecLen 会永远报最后一位非零）；
+- **结构对账**：分块表每行满足"块数×(数据+纠错)=总码字"，且总码字×8 + 剩余位 = 实测数据区模块数
+  （版本 2—6 的剩余位是 7 —— 这条也踩过：一开始按"整除 8"断言，其实是 359 = 352+7）。
+
+界面：`CodeActivity` 显示 8 位码、二维码（4 模块静区、整数倍缩放、按屏幕物理像素出图）、剩余秒进度条；
+另配手动校验框，同一码第二次校验会被判重放（`DynamicCode.verify` 的 used-window 缓存）。
+
+### 18.2 人脸登录：为什么必须分成"强"和"弱"两条路
+
+用户反馈"生物识别只有指纹"。根因不是权限（2.6 已补 `USE_BIOMETRIC`），而是 **模态等级**：
+
+- 带 `CryptoObject` 的认证只允许 `BIOMETRIC_STRONG`；多数国产机的 2D 人脸是 `BIOMETRIC_WEAK`，所以弹窗里没有它；
+- 更要紧的是：public SDK 的 `KeyProperties` **没有** `AUTH_BIOMETRIC_WEAK`（javap 实测 android-35 只有
+  `AUTH_BIOMETRIC_STRONG` / `AUTH_DEVICE_CREDENTIAL`）——**弱模态在公开 API 下解锁不了 Keystore 密钥**。
+
+所以拆成两条通道，证据强度分开记，不混为一谈：
+
+| 通道 | 实现 | 能证明什么 | 报告字段 |
+|---|---|---|---|
+| 强生物识别 | `BiometricPrompt` + `CryptoObject` + 每用一次授权的密钥 | 签名**只在**刚通过强生物识别后才可能产生（未认证时 `UserNotAuthenticated`） | `auth.cryptoBound` 隐含 true，`enforcement.blocked=true` |
+| 人脸登录（弱） | `setAllowedAuthenticators(BIOMETRIC_WEAK)`，无 CryptoObject，通过后普通设备密钥签名 | 系统刚弹过窗且用户过了认证（应用侧可信），但**签名本身不绑定**生物认证 | `weakAuth.cryptoBound=false` + `note` 明写 |
+
+TV-05 的通过判据仍然只看强通道（`auth.ok && enforcement.blocked`）；人脸那一路作为**附加证据**列在报告里，
+`LabReport` 的摘要会显示 `强=已签名 xxxms · 弱(人脸/指纹)=通过 xxxms · 强制=已拦截`。
+
+### 18.3 花名册查看：顺带修了"户数=9,000"的数据模型错
+
+原来测试 CSV 把成员行写成 `户号_M1` 这类独立户号，导入后索引里 9,000 个键 —— 报告里 `households` 直接等于行数，
+看不出"1,500 户、每户 5 人"。现在 CSV 加第 7 列 `member`：
+
+- 户主行 `member` 为空 → 建户对象，带 `memberList` 数组；
+- 成员行同 `familyNo`、`member=M1..M5` → 挂到该户的 `memberList` 下（成员行先到也能先占位后补）。
+
+自测输出改为 `households=1500`、`members=7500`、`rows=9000` 三个数，不再混用。
+`RosterActivity` 提供按户号模糊搜索（内存索引，与门禁同一条路径）、点行看明细与成员、页内导入 1,500 户、清空本机花名册；
+`RosterStore.browse()` 最多返回 50 行，`status()` 顺带报 `source / mainBytes / hasBackup / checksumOk`。
+
+### 18.4 构建与回归（真实输出）
+
+```
+powershell -File tools\build.ps1          → out\FaceVerify-offline.apk 225.4 MB  version=2.7-lab-r50/17
+powershell -File tools\build.ps1 -Model mbf → out\FaceVerify-lite.apk   72.1 MB  version=2.7-lab-lite/17
+
+tools\test.ps1:
+  OCR UNIT TESTS PASSED (15)
+  NFC TESTS PASSED (45)
+  QR TESTS PASSED (46)            ← 新增
+  被引用但不存在的类：无
+  加载成功 3892 个，失败 0 个
+  dex 类 4061 个 / 应包含 3892 个 / 缺失 0 个
+  ALL JVM TESTS PASSED
+```
+
+### 18.5 仍未验证
+
+- 三个新页面（动态码、人脸登录、花名册查看）**都没上过真机**：二维码能否被微信/相机扫出、
+  人脸弹窗在这台 Redmi 上是否真的出现并成功、花名册搜索框在小屏上的布局与键盘遮挡。
+- 二维码只做了"自证"（编码器 ↔ 独立解码器 + RS 校验子 + 结构对账），**没有第三方扫码器实测**；
+  现场用另一台手机扫一次，才算真通过。
+- 人脸那条路的签名不绑定生物认证，这是 Android 公开 API 的限制，不是实现取巧；要不要接受由业务方定。
+
+## 19. v2.8：人脸登录改走 App 内前置摄像头（2.8 / versionCode 18）
+
+### 19.1 真机现象（证据）
+
+`faceverify-lab-20261110-105517`（2.7-lab-lite / 17，Redmi 25102RKBEC / Android 16 / MIUI）：
+
+```
+capabilities: apiPrompt=true fingerprint=true face=true front摄像头(env.camera)=1
+auth     : mode=biometric-prompt-strong  ms=1303
+weakAuth : mode=biometric-prompt-weak    authType=2  cryptoBound=false
+```
+
+用户点「人脸登录」时系统弹的是**屏下指纹**，前置摄像头根本没启动。这不是权限问题（`USE_BIOMETRIC` 已在 2.6 补上、
+`capabilities.face=true`），而是 `BiometricPrompt.setAllowedAuthenticators(BIOMETRIC_WEAK)` 的语义：
+它只是"这些档位都允许"，**不能指定只要人脸**，系统会在已录入的模态里自己挑——指纹更快更稳，所以总是给指纹。
+换言之：**只要目标机型录了指纹，系统弹窗这条路就永远做不到"前置摄像头刷脸"**。
+
+### 19.2 改法：App 内自建一条人脸登录通道
+
+新增 `FaceLoginActivity`，链路与核验页同一条（同一套引擎、同一套对齐、同一套阈值）：
+
+```
+前置相机(Camera2) → MediaPipe 478 点 + blendshape → 随机 3 个活体动作
+   → 采集 6 帧并做几何门控 → 5 点对齐 112×112 → ArcFace 特征平均
+   → 与登记参照算余弦（登记过才有）→ 设备密钥签发登录令牌
+```
+
+证据强度照实写进结果 JSON，不冒充系统强生物识别：
+
+| 字段 | 含义 |
+|---|---|
+| `mode=front-camera-face` | 通道标识；与 `biometric-prompt-strong/weak` 区分开 |
+| `cameraFront=true` + `camera` + `frame` | **真的用前置相机**（相机 id 带"(前)"，附分析帧尺寸） |
+| `livenessPassed` / `livenessActions` / `blink·yawPeak·jaw·smile` | 挑战-响应活体（静态照片无法完成随机 3 动作） |
+| `identityBound=true/false` | 登记过参照人脸才是"证明了是谁"；没登记只有活体证据（`note` 明写） |
+| `similarity` / `threshold` | 仅 `identityBound=true` 时出现 |
+| `cryptoBound=false` | 2D 人脸解锁不了 Keystore 生物密钥（public SDK 无 `AUTH_BIOMETRIC_WEAK`），令牌由普通设备密钥签名 |
+| `token.verified` | 令牌自验签结果 |
+
+实验室卡片现在三个入口：**强生物识别**（系统强模态 + CryptoObject）/ **人脸登录（前置）**（v2.8 新路）/ **系统认证（指纹/人脸）**（v2.8 新增，允许密码兜底）。
+结果写 `results.bio.faceAuth`；`LabActivity.bioProbe()` 重跑自测时会保留它（不会因为重跑把这条证据冲掉）。
+
+TV-05 的通过判据**不变**（仍只看 `auth.ok && enforcement.blocked`）——人脸这几条是附加证据，
+`LabReport` 摘要变成：
+
+```
+强=已签名 1303ms · 系统认证=生物识别 1273ms · 前置人脸=活体通过 相似度0.86/阈值0.58 · 强制=已拦截
+```
+
+### 19.3 构建与回归（真实输出）
+
+```
+powershell -File tools\build.ps1 -Model mbf → out\FaceVerify-lite.apk 72.1 MB  version=2.8-lab-lite/18
+aapt2 dump xmltree（APK 内清单）→ activity .FaceLoginActivity 已注册
+tools\test.ps1:
+  NFC TESTS PASSED (45)
+  QR TESTS PASSED (46)
+  被引用但不存在的类：无
+  加载成功 3897 个，失败 0 个
+  dex 类 4078 个 / 应包含 3897 个 / 缺失 0 个   ← 新增 5 个 FaceLoginActivity 内部类
+  ALL JVM TESTS PASSED
+```
+
+顺带修 `tools/test.ps1` 的一个假失败：dex 覆盖检查原来写死读 `out\FaceVerify-offline.apk`，
+只构建 lite 时会拿新 classes 比旧 APK，报"缺失 5 个"；现在按最近构建的 APK 检查。
+
+### 19.4 仍未验证
+
+- **前置相机人脸登录没上过真机**：这次只做了构建与 JVM 回归。手机上要确认三件事——
+  前置画面方向是否正确（`CameraController` 前置按 `sensorOrientation + displayRotation` 计，若画面倒转，
+  主界面「调试 → 分析帧旋转」的手动 90/270 覆盖对这个页面同样生效）、
+  活体三个动作在低帧率下能否抓到、6 帧采集在弱光下的清晰度是否够阈值。
+- 这台机器上 `hasRef=false`（没登记参照人脸），所以首次测只会走"仅活体"这一档；
+  要看到 1:1 相似度，得先在主界面「① 从相册选择一张人像」建模。
+- 阈值仍是 0.58（mbf 按 FAR≈1e-3 标定），人脸登录沿用同一阈值与同一模型，**没有单独标定**。
+
+### 19.5 「系统弹窗只给指纹」是平台行为，以及三条通道各自的凭据强度
+
+真机反馈："点系统弹窗（对照）还是让指纹，无法确认走了手机自带的人脸"。这不是权限、也不是实现问题：
+
+- `BiometricPrompt.Builder.setAllowedAuthenticators(...)` 的语义是"这些档位都允许"，**没有 per-modality 约束**；
+  系统在已录入的模态里自选（指纹更快更稳 → 永远先给指纹）。Redmi 25102RKBEC / Android 16 上实测如此。
+- `AuthenticationResult.getAuthenticationType()` 只区分 `BIOMETRIC`(1) 与 `DEVICE_CREDENTIAL`(2)，
+  **不告诉应用用的是指纹还是人脸**，所以"确认走了人脸"从公开 API 上根本拿不到。
+
+v2.8 因此把系统那条通道升级为 **系统认证（`BIOMETRIC_WEAK | DEVICE_CREDENTIAL`）**：指纹 / 2D·3D 人脸 / 锁屏密码
+任一通过即"系统认证通过"，用设备密钥签发凭据（`payload.systemAuth=true`、`payload.authType`、`authTypeText`）。
+注意含 `DEVICE_CREDENTIAL` 时**不能再设 negative button**，否则构造直接抛 `IllegalArgumentException`。
+
+三条通道能证明什么，分开看：
+
+| 通道 | 入口 | 能证明 | 字段 |
+|---|---|---|---|
+| 强生物识别 | 「强生物识别」 | 指纹 / **3D 结构光人脸**（BIOMETRIC_STRONG 档）刚通过，且签名绑定认证（未认证签不出名） | `auth.mode=biometric-prompt-strong`，`enforcement.blocked=true` |
+| 系统认证 | 「系统认证（指纹/人脸）」 | **系统**判定认证通过（含密码兜底），并固化成票据 | `systemAuth.systemAuth=true`、`authType` |
+| 前置人脸 | 「人脸登录（前置）」 | 镜头前是真人（随机 3 动作活体）+ 与参照 1:1（登记过时） | `faceAuth.cameraFront=true`、`livenessPassed`、`identityBound` |
+
+**要让"手机自带人脸"成为系统认证凭据，只有两种情况：**
+
+1. 设备人脸是 **BIOMETRIC_STRONG**（3D 结构光/ToF，多数旗舰）：它本来就在「强生物识别」那条路的可选模态里，
+   走 CryptoObject 认证时系统可能用它 —— 此时 `auth` 就是"人脸通过的系统认证凭据"（签名绑定认证，强度最高）。
+   本机（Redmi 25102RKBEC）的 2D 人脸是 WEAK 档，不在其中。
+2. **现场自证（土办法，能让 2D 人脸在系统弹窗里出现）**：系统设置 → 指纹 → 删掉已录指纹，只保留人脸解锁，
+   再点「系统认证」。系统没有指纹可用时只能用人脸，通过后 `authType=1` —— 这就证明这台机器的系统弹窗
+   可以承载人脸，凭据链路本身没问题。测完把指纹加回去即可。
+   （若删掉指纹后 `canAuthenticate(BIOMETRIC_WEAK)` 直接返回不可用，说明该 OEM 没把人脸注册成生物识别模态，
+   这条通道永远只能指纹/密码，只能依赖 App 内相机那条路。）
+
+### 19.6 仍未验证（系统认证通道）
+
+- `authenticateSystem` 的对话框形态与 `authType` 取值**只上过模拟推演，没上真机**：含 `DEVICE_CREDENTIAL` 时
+  MIUI 的弹窗样式、按指纹后报 `authType=1` 还是 `2`、以及"删指纹只留人脸"后是否真的弹脸，都要在手机上确认。
+- 若 OEM 弹窗对 `BIOMETRIC_WEAK | DEVICE_CREDENTIAL` 组合有兼容性问题（个别 ROM 会直接报 `ERROR_NO_BIOMETRICS`），
+  需要按报告里的 `capabilities.canWeak / canCredential` 兜底回到 `BIOMETRIC_WEAK` 单模态（代码里保留 `BioAuth.authenticateWeak`）。
+
+## 20. 活体结果口径修正（"没让转头，结果里却有转头 0.04"）
+
+真机反馈：实时核验开始后提示的是眨眼/张嘴/微笑，**没有让转头**，但结果页"峰值"那行出现 `转头 0.04`
+（其他三个 0.54 以上）。查下来是**显示口径**问题，不是判定错，也不是数据造假：
+
+- `Liveness.State.maxYaw` 是**每帧**都累计的全程峰值（`st.maxYaw = max(maxYaw, |yaw|)`），
+  正常说话/轻微点头晃动就会到 0.03~0.06；而转头的触发阈值 `YAW_TURN = 0.20`，0.04 离通过差得远。
+- 旧结果页把这四个全程峰值统一渲染成"峰值 眨眼/转头/张嘴/微笑"，读起来就像"转头被计了分"。
+- 活体判定本来就不看峰值：它看的是**抽到的 3 个动作是否按顺序完成**（超时会自动换动作）。
+
+修正（不改判定逻辑，只改口径与字段）：
+
+| 新增 | 含义 |
+|---|---|
+| `State.tasks` / `tasksText()` | 本局实际抽到的动作序列（含超时替换后的结果），例如「眨眼 → 张嘴 → 微笑」 |
+| `State.blinkPeak/turnPeak/jawPeak/smilePeak` | **只在各自动作进行期间**累计的达成峰值；没抽到的动作恒为 0 |
+| `State.peaksText()` | 只列抽到的动作与峰值，例如「眨眼0.62 · 张嘴0.58 · 微笑0.61」 |
+| `lab.json` 的 `tasks` / `taskPeaks` | 报告里能看出"这局到底考了什么、各自多少" |
+
+结果页现在分三行：`抽到动作：…` / `各动作峰值：…` / `全程峰值（含自然微动，不作判据）…`。
+前置相机人脸登录页（`FaceLoginActivity`）用同一套口径。
+
+回归（`tools\test.ps1` 新增断言，真实输出）：
+
+```
+(g) turnPeak=0.00 maxYaw=0.90     ← 首动作不是转头时，即使画面 yaw 到 0.90，"转头"峰值仍为 0
+ALL JVM TESTS PASSED
+```
+
+> 说明：这条断言最初写成"找一个不含转头的种子"，结果 `Collections.shuffle` 对 4 选 3 的排列在 seed 1—499
+> 里恰好都含转头（4 元素的小列表，Random 前几个种子的排列很集中），说明"按随机种子挑场景"的测试不可靠；
+> 改成"找首动作不是转头的种子 + 人为喂 0.90 的 yaw"，才是稳定的确定性用例。
+
+## 21. 现场 NFC 读卡失败诊断（2.8-lab-lite，真卡首次上机）
+
+现场同事回传的原始日志：
+
+```
+选择 eMRTD 应用… 应用 A0000002471001 已选中
+读取 EF.CardAccess… EF.CardAccess 读取失败(选择 EF011C 失败:6982 安全状态不满足(未认证))，按无 PACE 处理
+BAC 认证… 失败:TagLostException: Tag was lost.
+```
+
+### 21.1 逐行读这段日志
+
+| 日志 | 含义 | 是不是问题 |
+|---|---|---|
+| `应用 A0000002471001 已选中` | ISO-DEP 通了、AID 正确、芯片是 eMRTD | 正常 |
+| `选择 EF011C 失败:6982` | 芯片**用 6982 回绝** EF.CardAccess：不开放这个文件（不支持 PACE，或要求先认证）。ICAO 里"不支持 PACE"本该回 6A82，但这批芯片回的是 6982 | **不是故障**，只是 PACE 不可用 → 回退 BAC 是正确路径 |
+| `BAC 认证 失败:TagLostException` | 物理层断连：卡离开/移动了感应区，或会话被复位 | **这才是失败原因** |
+
+关键判据：如果 MRZ 输错，BAC 会回 `6300`；如果芯片只支持 PACE 而拒绝 BAC，会回 `6982/6A81`。
+**TagLost 只能是物理断连**（`IsoDep.transceive` 拿不到响应），不是密码学错误。
+
+### 21.2 已改的四处
+
+1. **6982 不再当"读卡失败"**：`CardSession.readFile(int fid, boolean optional)` 新增可选语义，
+   `6A82 / 6A88 / 6D00 / 6982` 都视为"该文件不可用"返回 `null`；只有 `6A86`（参数错）这类真错误才抛异常。
+   `IcaoReader` 用它探测 `EF.CardAccess`，日志改为「芯片不开放 EF.CardAccess（6A82/6982），按无 PACE 处理（不影响 BAC）」。
+2. **BAC 前重新 SELECT AID**：选择文件被拒后，部分芯片会停在"文件上下文/半认证"状态，
+   直接 `GET CHALLENGE` 容易把整条链路重置（现场就表现成 TagLost）。现在走 BAC 之前重新选一次应用（标准允许重复 SELECT）。
+3. **presence check 250ms → 600ms**：平台每隔 N 毫秒探测"卡还在不在"，探测本身要插一次 ISO-DEP 交互。
+   250ms 对某些芯片过密，调到 600ms 减少干扰（`EXTRA_READER_PRESENCE_CHECK_DELAY`）。
+4. **失败提示可操作 + 带诊断**：
+   - `TagLost` → 「卡离开了感应区（TagLost）。请把证件背面贴牢…读 DG2 人像要 5~15 秒，全程不要移动或拿开；重贴会自动再试一次」；
+   - 界面额外显示 **ATS/历史字节** 与 **APDU 条数 + 耗时**（在哪一步断的，看下方日志）；
+   - BAC 被拒时按 SW 给具体原因：`6300` → MRZ 不一致；`6982/6A81` → 该卡可能只支持 PACE。
+
+### 21.3 新增单测（不需要真卡）
+
+```
+=== 1b. 可选文件（EF.CardAccess）的拒绝码语义 ===
+  OK SELECT 6982 → 视为不可用（不抛异常） (6982)
+  OK SELECT 6A82 → 视为不存在 (6A82)
+  OK SELECT 6D00 → 视为不支持 (6D00)
+  OK SELECT 6A86 → 仍抛异常（真错误不吞） (6A86)
+NFC TESTS PASSED (49)
+```
+
+### 21.4 现场排查清单（按顺序做）
+
+1. **贴牢 10 秒不要动**：读 DG2 人像要 5~15 秒、上百条 APDU，中途移动必然 TagLost。把卡平放在手机背面上半部（摄像头附近），用手指按住。
+2. **去掉手机壳**（尤其磁吸壳、金属壳、带卡槽的皮套），NFC 天线在背面上半部。
+3. **换一个位置慢慢挪**：不同机型天线位置不同；贴上去听到"叮"再停住。
+4. **确认 MRZ 三项与卡面完全一致**（证件号 / 出生 YYMMDD / 有效期 YYMMDD）。MRZ 错会返回 `6300`，不会 TagLost。
+5. 如果反复 TagLost 且换手机也一样，把界面上的 **ATS/历史字节** 与 **APDU 条数** 截图发回——
+   ATS 能区分"卡片太远/复位"与"这卡不是标准 eMRTD 结构"。
+
+### 21.5 仍未验证
+
+- 以上改动**没有在真卡上重跑**（现场只有一次失败记录，且失败在物理层）。
+- 如果重试后 BAC 返回 `6982/6A81`，说明这张卡只支持 PACE 且 `EF.CardAccess` 受保护——这种情况需要
+  **预置 PACE 参数**（OID + 密码）才能读，属于新的工作量，不是改文案能解决的。
+
+## 22. 读卡日志可导出 + 卡背 MRZ 小字漏检（2.8-lab-lite）
+
+### 22.1 读卡日志：做成能直接发回来的文件
+
+现场问题：读卡失败时日志在界面里要滚动才能看全，截图经常缺前半段，远程没法定位。
+
+做法：
+
+- 每次读卡（**成功或失败**）都写一份 `Android/data/<包名>/files/lab-export/nfc-log-<时间戳>.txt`，内容包含：
+  时间、应用与版本、设备与系统、AID、MRZi、**卡片 ATS/历史字节**、结果、失败原因、安全通道、APDU 条数/耗时、逐条步骤日志；
+- 界面新增按钮「导出读卡日志（发给研发分析）」→ 走系统分享（微信/邮件都能发）；
+- `ReportProvider` 放开 `.txt`（仍然只读、只允许导出目录内的文件，`/` 与 `..` 一律拒绝）；
+- 「导出验证报告」ZIP 里额外带 `nfc/nfc-log-*.txt`（取最近一份），现场只导一次报告也能带上读卡日志。
+
+### 22.2 MRZ 漏检：卡在画面里太小，整行检测不到
+
+现场截图（`1001L0001262511103` 已识别，证件号/出生/有效期全空，提示「MRZ 不完整」）：
+
+- 卡背图片肉眼看很清晰，但**卡只占画面约 1/3**；`recognize()` 还会把最长边压到 1280，
+  MRZ 每字符只剩 6~10px，DBNet 整行不出框；户号字号大、笔画粗，所以能读出来。
+  这不是"照片不清"，是"字在算法眼里太小"。
+
+修正：
+
+1. `OcrCore.recognizeCard()`：整幅识别后若 **MRZ 行 < 2**，把图转正 → 裁下半部（0.55 / 0.40 / 0.70 三个高度）→
+   放大 1.2~2.5 倍（不超过 2400px）→ 重新检测识别；检测的 `maxSide` 传放大后的尺寸，避免又被 `MAX_SIDE` 压回去。
+   补扫总耗时限制 2 秒，卡真的很小时最多多花两次检测。
+2. 正常大小的卡（≥400px 宽）不受影响：MRZ 已够两行，直接返回，不跑补扫。
+3. **副作用修复**：小图上 MRZ 的片段会被 `CardFields.findFamilyNo` 当成户号（实测报出 `9185I26F2707244IR6`）。
+   现在 `findFamilyNo` 跳过"像 MRZ 的行"（含 `<<` / ≥24 位 alnum / 前 6 位数字且第 8 位是 `M|F|<`）。
+   户号格式是 4 位数字 + 1 位字母 + 13 位字母数字，前 6 位必含字母，不会误伤。
+4. 提示更如实：MRZ 可用但**校验位有误**时写「读卡可能失败（建议手输）」，不再笼统报"MRZ 可用"；
+   MRZ 不可用时给出「把卡靠近、让卡片占满取景框再拍 / 用手输 MRZ」的操作指引。
+
+回归（`tools\test.ps1`，新增断言）：
+
+```
+=== small card (1280x960, card width 300px) ===
+  auto: family=null mrzUsable=false doc=null (829ms)          ← 整幅识别：整行 MRZ 漏检
+  card: family=1002E6996574380150 mrzUsable=true doc=26F279T24 (5697ms)  ← 补扫：MRZ 行救回来了
+```
+
+断言两条：`auto: family=null mrzUsable=false`（复现漏检）与 `card: ... mrzUsable=true`（补扫有效）。
+`OCR UNIT TESTS PASSED (15)` / `NFC TESTS PASSED (49)` / `ALL JVM TESTS PASSED`。
+
+### 22.3 顺带修的一个工具链坑
+
+`build\jvmtest` 里残留的旧 class 会**盖住** `build\classes`（classpath 顺序在前），表现成
+`NoSuchMethodError: recognizeCard`——代码明明改了却报"方法不存在"。这已经是第三次踩到
+（之前是 `Liveness.tasks`）。`tools\test.ps1` 现在每次先清空 `build\jvmtest`。
+
+### 22.4 仍未验证
+
+- 补扫**没有在真机上复测**：300px 是合成图模拟，真实相机的对焦、反光、卡面全息带都会影响检出率。
+- 极限小图（300px）下即使补扫成功，`docNumber` 仍可能读错（示例 `26F279T24`），所以界面对校验位有误会提示手输。
+- ATS/历史字节字段依赖具体机型返回，部分 ROM 可能为空（界面会显示"未取到"）。
+
+## 23. 识别日志一键导出（微信可发）+ MRZ 条带兜底（2.8-lab-lite）
+
+### 23.1 日志：本地落文件 + 一键发微信
+
+现场要求："导出读卡日志要生成本地文件，然后一键分享到微信"。之前只发 `text/plain`，
+微信对 `ACTION_SEND + text/plain + content://` 的接收不稳定，所以改成：
+
+1. **本地文件**：`Android/data/<包名>/files/lab-export/idcard-diag-<时间戳>.txt`
+   （OCR 每行原文 + NFC 读卡步骤合并成一份）；
+2. **一键分享**：同名 `.zip` 由 `LabStore.zipLog()` 生成，`Intent.ACTION_SEND` + `application/zip`
+   → 系统选择器 → 微信/邮件/网盘都能收（与「导出验证报告」同一形态）；
+3. 按钮文案改成「导出识别日志（OCR + 读卡，一键发微信）」，点击后 toast 直接显示落盘路径；
+4. 「导出验证报告」ZIP 里同时带 `nfc/` 与 `ocr/` 两份最新日志（`ocr-log-*.txt` / `nfc-log-*.txt`）。
+
+日志内容（OCR 部分）逐行给出 `置信度 + 原文`，这就是判断"照片看着清楚、算法却读不到"的唯一依据。
+
+### 23.2 MRZ 仍然读不到：加一层跳过检测的条带识别
+
+现场第二次反馈：卡已经**占满取景框**，MRZ 三行肉眼极清楚（`IDIRQAC6764883…` / `7602067M2705088IRQ…`），
+仍然"MRZ 不完整"。说明不只是字号问题，DBNet 对低对比、带全息反光的等宽 MRZ 行也可能整行不出框。
+
+新增兜底 `OcrCore.scanMrzBands()`：**不经过检测模型**，直接在图像下部按水平条带
+（带宽 ≈ 图高 3.2%、步进 50%）逐条送识别模型，只有满足 MRZ 结构的才收：
+
+- TD1 第 1 行：以 `ID` / `I<` / `AC` / `A<` / `C<` 开头且长度 ≥ 28；
+- TD1 第 2 行：前 6 位数字且第 8 位是 `M`/`F`/`<`。
+
+条带区域优先用已识别的文字行定位（取卡片下半部），避免全图盲扫；整段限时 2.5 秒。
+误报控制：条带只有"结构化 MRZ"才进候选，户号行（18 位）与阿拉伯文标签都不会命中。
+
+### 23.3 顺带把识别耗时压下来
+
+两帧都跑兜底会把一次识别拖到 20 秒以上（现场实测 24s/2 帧）。现在：
+
+| 帧 | 策略 |
+|---|---|
+| 第 1 帧 | 深度识别：全图 → 下半部放大补扫 → 条带兜底 |
+| 第 2 帧 | 只做全图（`recognizeAuto`），用于投票 |
+
+`OcrEngine.scan(bmp, deep)` 暴露这个开关；`IdCardActivity` 按帧序调用。
+
+### 23.4 回归与仍未验证
+
+```
+OCR UNIT TESTS PASSED (15)
+NFC TESTS PASSED (49)
+QR TESTS PASSED (46)
+ALL JVM TESTS PASSED
+```
+
+- 条带兜底**没有在真机上验证过**：现场那张卡的每行 OCR 原文要先通过「导出识别日志」拿回来，
+  才能确认是"整行没检出"还是"检出但识别错"。
+- 若日志显示 MRZ 行被检出、文本接近正确但 `findMrz` 仍不认，下一步按日志修 `findMrz` 的行判定
+  （例如允许 1~2 位残缺、用校验位反解补齐）。
+
+## 24. 真机日志分析：MRZ 不是"看不清"，是被 DBNet 切成碎片
+
+现场回传 `idcard-diag-20261110-154411.zip`（2.8-lab-lite / 18，Redmi 25102RKBEC / Android 16），
+OCR 日志关键数据：
+
+```
+帧数：2 · 耗时：15591ms
+结果：户号=1002L00M9770006805  MRZ可用=false  校验位(doc/dob/exp)=false/false/false
+
+— 第 1 帧 · 方向 0° · 79 行 · 10362ms
+     98%  1002L00M9770006805         ← 户号完整
+     96%  IDIRQAC6764                ← MRZ 第 1 行只剩前 12 字符
+     96%  7602067M21                 ← MRZ 第 2 行只剩前 11 字符
+     93%  ALEQYLYSEL                 ← MRZ 第 3 行前 10 字符
+     38%  X4E388                     ← 后面全是碎块
+     92%  380M40323024
+    100%  D / 100%  H / 99% PS / …
+
+— 第 2 帧 · 方向 0° · 39 行 · 5228ms
+     97%  IDIRQAC67648（13 字符）
+    100%  7602067M27（10 字符）
+```
+
+**根因**：MRZ 三行每行都被 DBNet 切成 2~4 段（字符间距 + 卡面底纹 + 中间那条全息防伪带干扰），
+最长的一段只有 13 字符；而 `CardFields.findMrz` 的门槛是 `sanitizeMrz(text).length() >= 26`，
+所以**所有片段都被丢弃**，`mrzFound=false` → 界面报「MRZ 不完整」。
+
+这不是清晰度问题（户号 98%/99% 读得很准），是**行被切碎后没有拼回去**。
+拼文本也没用：右半段是 `X4E388` / `380M40323024` 这种乱码，必须按整行重新识别。
+
+### 24.1 修法：按"行组外接框"整行重识别
+
+`OcrCore.rereadSplitLines()`（新增，`recognizeCard` 在 MRZ 行不足 2 时调用）：
+
+1. 把已识别的行按 `cy` 聚类（阈值 `0.8 × 行高`，比原来的 0.55 宽——碎块常被底纹带偏几个像素）；
+2. 组内还要水平邻近（`|Δcx| < (w1+w2) × 0.85`），避免把"标签 + 值"这种贴在一起的两段并进来；
+3. 取组内所有 bbox 的并集（外扩 2px），裁出来**整行重新识别**（白名单 `0-9A-Z<`，48px 高）；
+4. 只有 `置信度 ≥ 0.55 且长度 ≥ 6` 才作为新的一行加入；高度超过图高 15% 的组直接跳过（说明跨了多行）。
+
+这样 `IDIRQAC6764` + 右半段会被还原成完整 30 字符的 `IDIRQAC6764…`，`findMrz` 才能接手。
+已有两行 MRZ 的卡**不触发**（`countMrzLike < 2` 才跑），正常卡零额外开销。
+
+### 24.2 为什么这次不靠条带兜底
+
+`scanMrzBands()`（第 23 节加的）在这张卡上没产出合格行：条带固定高度（图高 3.2%）会跨越两行 MRZ
+或只切到字符上半身，识别结果结构不符合 TD1。它能救的是"整行漏检但行高合适"的情况，
+这张卡是"行被切碎"，所以先走行组重识别。条带保留为最后兜底。
+
+### 24.3 回归（真实输出）
+
+```
+auto: family=null mrzUsable=false doc=null (832ms)                      ← 300px 小卡：整幅仍漏
+card: family=1002E6996574380150 mrzUsable=true doc=26F279T24 (5323ms)   ← 深度识别救回
+家庭编号=1002E6996574360150  MRZ=可用 …                                 ← 正常合成卡不退化
+OCR UNIT TESTS PASSED (15) / NFC TESTS PASSED (49) / QR TESTS PASSED (46)
+ALL JVM TESTS PASSED
+```
+
+### 24.4 仍未验证
+
+- 行组重识别**只在合成图上验证了不退化**，还没在真机上跑过这张卡。按日志的碎片形态（左段 12~13 字符、
+  右段被切成小碎块）判断应该能拼回整行，但必须在手机上再测一次。
+- 如果再测仍失败，下一步用日志里的 `框坐标` 直接定位：`OcrActivity` 的日志目前只记录文本，
+  需要补 `cx/cy/w/h` 才能判断聚类是否把两段分到了一组（下一版加）。
+
+## 25. 第二次真机日志：MRZ 只检出左边 12 个字符（图像被压缩 + 右半段漏检）
+
+`idcard-diag-20261110-155457.zip`（2.8-lab-lite / 18，同一台 Redmi）：
+
+```
+第 1 帧 · 80 行 · 10231ms
+   91%  IDIRQAC67        x=254 y=388 w=183 h=24     ← MRZ 第 1 行只有 12 字符
+  100%  IDIRQAC676       x=271 y=388 w=223 h=33     ← 行组重识别也只拿到 9 字符
+  100%  7602067M2        x=257 y=425 w=186 h=24     ← 第 2 行同样只有左半段
+   94%  ALEQYLYSE        x=275 y=461 w=212 h=22
+第 2 帧 · 24 行 · 3578ms
+   97%  IDIRQAC6764      x=277 y=397 w=229 h=23
+  100%  7602067          x=236 y=435 w=142 h=24
+   88%  ALEQYLY<<EL      x=281 y=470 w=223 h=23
+```
+
+### 25.1 两个新事实
+
+1. **原始帧很大**：日志里有 `x=2050 / 2190 / 2304` 的行，说明相机出的是 **2592×1944**（后置 4:3 的最小档，
+   `CameraController.pickSize` 选不到 1280×960）。`recognize()` 又把最长边压到 1280，
+   MRZ 每字符从 ~15px 变成 **~7px** —— DBNet 检出率骤降。
+2. **右半段整块漏检**：`IDIRQAC67` 只覆盖 x=254~437，而整行 30 字符应该到 x≈700；
+   y=388 这一带右半边**没有任何行**。所以行组重识别（上一节）拿到的还是左半段，`findMrz` 的 26 字符门槛照样过不去。
+
+### 25.2 这次的修复
+
+| 改动 | 原因 |
+|---|---|
+| `MAX_SIDE` 1280 → **1600** | 2592 压到 1600 时 MRZ 每字符 ~9px（比 7px 好），det 耗时约为原来的 1.6 倍 |
+| `rereadSplitLines` 支持**单段 MRZ 左半段** | 以前只处理"被切成多段"的组；`IDIRQAC67` 是孤立一段，直接被跳过 |
+| 命中左半段时**把框向右扩到 `20 × 行高`** | MRZ 是固定 30 字符的等宽行：24px 行高 → 整行约 450~480px，右扩 480px 正好覆盖整行，再整行重识别 |
+| 条带兜底的高度改按**中位行高** | 固定 3.2% 图高在 1944px 上是 62px，跨了两行 MRZ，识别必然乱；改成中位行高×1.35 |
+
+左半段判定（`mrzLeftFragment`）：长度 6~25，且以 `ID`/`I<`/`AC`/`A<`/`C<` 开头，或"前 6 位数字 + 第 8 位是 M/F/<"。
+这样 `IDIRQAC67`、`7602067M2` 都会命中，而户号行（18 位、前 6 位含字母）和姓名行不会。
+
+### 25.3 回归
+
+```
+auto: family=null mrzUsable=false doc=null (746ms)
+card: family=1002E6996574380150 mrzUsable=true doc=26F279T24 (4666ms)
+家庭编号=1002E6996574360150  MRZ=可用 …        ← 正常合成卡不退化
+OCR UNIT TESTS PASSED (15) / NFC TESTS PASSED (49) / QR TESTS PASSED (46)
+ALL JVM TESTS PASSED
+```
+
+### 25.4 仍未验证 / 下一步
+
+- 右扩重识别**没在真机上跑过**。若仍失败，日志里会看到右扩后的行（`w` 明显变大）；
+  如果 `w` 变大了但文本仍只有十来个字符，说明右半段的像素本身不行（反光/全息条压住了），
+  那就要走"多帧融合 + 校验位反解"，而不是继续扩框。
+- 2592×1944 的帧里，`MIN_CONF = 0.30` 会放进大量底纹碎块（第 1 帧 80 行、10 秒），
+  下一版可以考虑按行高/字符数过滤一遍再 rec，把单帧耗时压回 5 秒内。
+
+## 26. NFC 读卡失败：不是"没贴够 10 秒"，是"读 EF.CardAccess 把会话弄死了"
+
+现场第二次读卡日志（`idcard-diag-20261110-113509`，HONOR BVL-N49 / Android 16）：
+
+```
+AID：A0000002471001
+MRZi：A12464759896081883202274          ← MRZ 正确（doc 校验 8 / dob 8 / exp 4 都在）
+卡片 ATS/历史字节：803198738401e0
+结果：失败    APDU：2 条 · 349ms
+
+步骤日志：
+  选择 eMRTD 应用…        应用 A0000002471001 已选中     ← APDU 1
+  读取 EF.CardAccess…     芯片不开放 EF.CardAccess（6A82/6982） ← APDU 2
+  BAC 认证…               失败：TagLostException：Tag was lost.
+```
+
+### 26.1 为什么可以断定与"贴卡时长"无关
+
+- 全程 **349ms**，2 条 APDU。人不可能 0.35 秒就把卡拿开；
+- 而且"选中应用""选择文件"都成功返回了（有 R-APDU），说明**贴的位置是对的、NFC 耦合正常**；
+- `TagLost` 出现在 `SELECT EF.CardAccess` 返回 **6982** 之后的下一条 APDU —— 也就是**芯片在拒绝这个文件后把会话复位了**。
+
+上一次（Redmi）是同一个位置断的，只是当时是先读 CardAccess 再 BAC；两次都断在"6982 之后"，
+说明这不是某一台手机的问题，而是**这张卡的行为**：不开放 EF.CardAccess，且被问过之后就不再应答。
+
+### 26.2 修复：BAC 优先，PACE 只在 BAC 失败后再探测
+
+`IcaoReader.read` 的顺序改成：
+
+```
+SELECT AID
+  → BAC（GET CHALLENGE + EXTERNAL AUTHENTICATE）
+      成功 → 直接读 DG
+      失败（非 TagLost）→ 重选 AID → 读 EF.CardAccess → 有 PACE 参数就走 PACE
+      失败（TagLost）→ 立刻上报，不去试 PACE（物理断开，试也没用）
+```
+
+以前是"为了拿 PACE 参数先读 CardAccess"，恰恰这一步把会话弄死。BAC 是 ICAO 9303-11 的老方案，
+兼容面最广，先试它的成功率最高；只有 BAC 被拒（例如 `6300` MRZ 不对、`6A81` 不支持）才去碰 CardAccess。
+
+### 26.3 顺带让现场能自己判断"贴够了没有"
+
+- 读卡过程中顶部状态栏每秒刷新：**「读卡中… 已 N 秒 · 保持贴合不要移动（读人像通常 5~15 秒）」**；
+- 读卡结束顶部显示 **「读卡失败 · 349ms · 2 条 APDU」**；
+- 失败提示里直接写「本次只走了 349ms / 2 条 APDU 就断了——不是贴卡时间不够，是芯片侧会话被复位」。
+
+### 26.4 单测（假芯片也跟着改了）
+
+`VirtualCard(dir, usePace=true)` 以前同时支持 BAC 和 PACE，改成"**只支持 PACE 的卡对 BAC 返回 6A81**"，
+这样测试 7 真正覆盖「BAC 先试 → 被拒 → 读 CardAccess → PACE 成功」这条回退链路：
+
+```
+NFC TESTS PASSED (49)
+```
+
+### 26.5 仍未验证 / 下次看什么
+
+- 这张伊拉克卡**是否支持 BAC 还不知道**。装新包再读一次，看日志里 `BAC 认证…` 后面是：
+  - `安全通道：BAC（3DES 安全报文）` → 通了，问题解决；
+  - `BAC 外部认证失败：6300（MRZ 不正确…）` → MRZ 里某个字段（多半是有效期/出生）和芯片不一致，需要核对卡面；
+  - `BAC 取挑战失败：6982/6A81（芯片拒绝 BAC…）` → 这张卡只支持 PACE，而且 `EF.CardAccess` 又被保护，
+    那就要预置 PACE 参数（OID + 密码），属于新工作量。
+- 荣耀这台机器的 NFC 天线位置与小米不同（日志里贴卡位置是对的，但读 DG2 的稳定性还要再测）。
+
 ## 没有验证的部分（不要当成已验证）
 
 | 项 | 状态 | 原因 |
 |---|---|---|
 | 真机运行 | **已验证（v1.7）** | 安装/启动/建模/活体 3 动作/1:1 比对全部跑通，无异常 |
-| 现场验证清单页（v2.4） | **未验证** | 无真机：只做了编译、JVM 全类加载、APK 清单反查与报告/ZIP 代码审查 |
+| 技术验证实验室页（v2.5 起，v2.7 加三页） | 部分已验证 | 2.6 真机跑过 7 项全通过；v2.7 新增的**动态码二维码页 / 花名册查看页**仍未上机，二维码也还没被第三方扫码器扫过 |
+| 人脸登录（v2.7 系统弹窗） | **已验证不可用** | 真机实测弹的是指纹：`setAllowedAuthenticators(BIOMETRIC_WEAK)` 不能指定只要人脸（§19.1），已改成前置相机通道 |
+| 前置相机人脸登录（v2.8） | **未验证** | 只做了构建与 JVM 回归；前置画面方向、低帧率动作捕捉、弱光 6 帧质量要上机确认（§19.4） |
+| 系统认证通道（v2.8，指纹/人脸/密码） | **未验证** | 含密码兜底的弹窗形态、`authType` 取值、"只留人脸"是否真弹脸，只能上机确认（§19.6） |
 | 相机帧方向/帧率 | **未验证** | 依赖具体机型；已提供手动旋转开关 + 所见即算法所见 |
 | MediaPipe 关键点索引是否与预期一致 | **间接支持** | 用敏感度实验限制了最坏影响；有 5 点几何门控兜底 |
 | 伊拉克人群精度 | **未标定** | 无数据；App 内置评测模式可现场标定 |

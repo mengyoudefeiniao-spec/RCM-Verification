@@ -14,13 +14,15 @@
 *.jar
 
 # ===== 模型权重（单个文件最大 166 MB，超过 GitHub 100 MB 单文件硬限制）=====
-# models/*.onnx 走 Git LFS 单独纳入（见 .gitattributes），其余大二进制不入库
+# models/ 下的 ONNX 权重由 Git LFS 管理，face_landmarker.task 直接入库；
+# 其余大二进制（构建产物、数据集）不入库
 *.onnx
 *.task
 *.parquet
 
-# 例外：models/ 下的 ONNX 权重由 Git LFS 管理
+# 例外：models/ 下的模型文件需随仓库分发（iOS 版复用同一批模型）
 !models/*.onnx
+!models/*.task
 
 # ===== Python 缓存 =====
 __pycache__/

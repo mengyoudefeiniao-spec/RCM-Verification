@@ -3,6 +3,7 @@ package iq.digitalration.faceverify;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 
 /**
@@ -31,8 +32,45 @@ public final class Liveness {
         public int total = 3;
         public boolean finished = false;
         public boolean passed = false;
+        /** 全程峰值（每帧都累计，含自然微动）：只用来看数据，**不是**动作判据。 */
         public float maxBlink = 0, maxYaw = 0, maxJaw = 0, maxSmile = 0;
         public List<String> log = new ArrayList<>();
+
+        /** 本局实际抽到的动作（超时被替换后按替换结果记）。 */
+        public final List<Task> tasks = new ArrayList<>();
+        /** 各动作在"它进行期间"的峰值：没抽到的动作恒为 0，不会把别处的自然微动算进来。 */
+        public float blinkPeak = 0, turnPeak = 0, jawPeak = 0, smilePeak = 0;
+
+        /** 抽到的动作序列，例如「眨眼 → 张嘴 → 微笑」。 */
+        public String tasksText() {
+            StringBuilder sb = new StringBuilder();
+            for (Task t : tasks) {
+                if (sb.length() > 0) sb.append(" → ");
+                sb.append(labelFor(t));
+            }
+            return sb.toString();
+        }
+
+        /**
+         * 只列**抽到的**动作及其达成峰值。
+         *
+         * <p>旧界面把全程 {@code maxYaw} 当"转头"显示，没抽到转头也会出现 0.04 这种自然微动，
+         * 看起来像"没让转头却判了转头"。现在没抽到的动作不出现；全程峰值单独标注。
+         */
+        public String peaksText() {
+            StringBuilder sb = new StringBuilder();
+            for (Task t : tasks) {
+                if (sb.length() > 0) sb.append(" · ");
+                switch (t) {
+                    case BLINK: sb.append(String.format(Locale.US, "眨眼%.2f", blinkPeak)); break;
+                    case TURN:  sb.append(String.format(Locale.US, "转头%.2f", turnPeak)); break;
+                    case MOUTH: sb.append(String.format(Locale.US, "张嘴%.2f", jawPeak)); break;
+                    case SMILE: sb.append(String.format(Locale.US, "微笑%.2f", smilePeak)); break;
+                    default: break;
+                }
+            }
+            return sb.toString();
+        }
     }
 
     private final List<Task> seq = new ArrayList<>();
@@ -59,6 +97,7 @@ public final class Liveness {
         pool.add(Task.SMILE);
         Collections.shuffle(pool, new Random(seed));
         for (int i = 0; i < 3; i++) seq.add(pool.get(i));
+        st.tasks.addAll(seq);
         st.total = 3;
         st.instruction = instructionFor(seq.get(0));
         taskStart = System.currentTimeMillis();
@@ -80,6 +119,13 @@ public final class Liveness {
         st.maxSmile = Math.max(st.maxSmile, s.smile());
 
         Task t = seq.get(idx);
+        // 只在该动作**进行期间**累计它自己的峰值（没抽到的动作不会沾到别处的微动）
+        switch (t) {
+            case BLINK: st.blinkPeak = Math.max(st.blinkPeak, blink); break;
+            case TURN:  st.turnPeak = Math.max(st.turnPeak, Math.abs(s.yaw())); break;
+            case MOUTH: st.jawPeak = Math.max(st.jawPeak, s.jawOpen()); break;
+            case SMILE: st.smilePeak = Math.max(st.smilePeak, s.smile()); break;
+        }
         boolean ok = false;
         switch (t) {
             case BLINK: {
@@ -138,6 +184,7 @@ public final class Liveness {
                 Task alt = pickAlternative(t);
                 if (alt != null) {
                     seq.set(idx, alt);
+                    st.tasks.set(idx, alt);
                     st.log.add("swap:" + t.name().toLowerCase() + "->" + alt.name().toLowerCase());
                     st.hint = "换一个动作：" + instructionFor(alt);
                     taskStart = ts;
@@ -182,6 +229,17 @@ public final class Liveness {
             case TURN:  return "请把头转向一侧";
             case MOUTH: return "请张开嘴巴";
             case SMILE: return "请微笑";
+            default: return "";
+        }
+    }
+
+    /** 动作的短名（报告/结果页用）。 */
+    public static String labelFor(Task t) {
+        switch (t) {
+            case BLINK: return "眨眼";
+            case TURN:  return "转头";
+            case MOUTH: return "张嘴";
+            case SMILE: return "微笑";
             default: return "";
         }
     }

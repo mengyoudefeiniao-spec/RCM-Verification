@@ -97,7 +97,9 @@ public final class OcrCore {
     private static final float[] MEAN = {0.485f, 0.456f, 0.406f};
     private static final float[] STD = {0.229f, 0.224f, 0.225f};
 
-    private static final int MAX_SIDE = 1280;   // 检测最长边
+    // 检测最长边。真机帧是 2592x1944（后置 4:3 最小档），压到 1280 后 MRZ 每字符只剩 ~7px，
+    // DBNet 会整行漏检；1600 时约 9px，能明显提升检出率，det 耗时约为 1280 的 1.6 倍。
+    private static final int MAX_SIDE = 1600;
     private static final float DET_THR = 0.30f; // DBNet 概率阈值
     private static final float UNCLIP = 1.80f;  // 按面积/周长外扩，恢复 DBNet 收缩掉的笔画
     private static final int MIN_AREA = 20;
@@ -236,6 +238,222 @@ public final class OcrCore {
         return new Scan(mapped, deg);
     }
 
+    /**
+     * 卡背专用识别：整幅识别后若 MRZ 行不足两行，就把下半部裁出来**放大**再识别一次。
+     *
+     * <p>现场问题（2.8 真机）：卡在画面里只占三分之一宽时，MRZ 每字符只有 6~10 像素，
+     * DBNet 直接漏检 —— 界面提示"MRZ 不完整"，但照片肉眼非常清晰。整幅图缩到 1280 会把
+     * 本来就很小的 MRZ 再压小，所以这里对下半部做 1.5x~2.5x 放大（放大量按不超过 2400px 控制），
+     * 并让检测不要再被 MAX_SIDE 二次缩小。
+     */
+    public Scan recognizeCard(int[] argb, int w, int h) {
+        Scan base = recognizeAuto(argb, w, h);
+        // MRZ 常被 DBNet 切成 2~4 段（字符间距 + 底纹 + 全息条）：前半段读对、后半段乱码，
+        // 拼文本没用，必须按"行组外接框"整行重新识别。已有两行 MRZ 的卡不做，零额外开销。
+        if (countMrzLike(base.lines) < 2 && base.rotation == 0) {
+            rereadSplitLines(argb, w, h, base.lines);
+        }
+        if (countMrzLike(base.lines) >= 2) return base;
+
+        int[] up = argb;
+        int uw = w, uh = h;
+        if (base.rotation != 0) {
+            up = rotate(argb, w, h, base.rotation);
+            if (base.rotation == 90 || base.rotation == 270) { uw = h; uh = w; }
+        }
+
+        List<Line> all = new ArrayList<>(base.lines);
+        long t0 = System.currentTimeMillis();
+        for (float top : new float[]{0.55f, 0.40f, 0.70f}) {
+            // 补扫最多花 2 秒：卡真的很小时多试几次有意义，但不能把一次识别拖到十几秒
+            if (System.currentTimeMillis() - t0 > 2000) break;
+            int y0 = Math.round(uh * top);
+            int ch = uh - y0;
+            if (ch < 24) continue;
+            int[] crop = new int[uw * ch];
+            System.arraycopy(up, y0 * uw, crop, 0, uw * ch);
+
+            float zoom = Math.min(2.5f, 2400f / Math.max(uw, ch));
+            if (zoom < 1.2f) continue;
+            int zw = Math.round(uw * zoom), zh = Math.round(ch * zoom);
+            int[] z = resize(crop, uw, ch, zw, zh);
+            List<Line> zl = recognize(z, zw, zh, Math.max(zw, zh));
+            all.addAll(zl);
+            if (countMrzLike(all) >= 2) break;
+        }
+
+        // 最后一招：MRZ 是等宽印刷、位置固定，检测整行漏检时干脆按水平条带"直接读行"（跳过检测）
+        if (countMrzLike(all) < 2) {
+            all.addAll(scanMrzBands(up, uw, uh, base.lines));
+        }
+        return new Scan(all, base.rotation);
+    }
+
+    /**
+     * 同一行被切成多段时，按"行组外接框"重新整行识别一次（不是把各段文本拼起来）。
+     *
+     * <p>现场日志（伊拉克 eMRTD，2.8-lab-lite）：MRZ 三行各被切成 2~4 段，
+     * 前半段是 {@code IDIRQAC6764 / 7602067M21}（读对），后半段是 {@code X4E388 / 380M40323024}（乱码），
+     * 于是最长的一段只有 13 字符，而 {@code CardFields.findMrz} 要求 ≥26 字符 → 全部被丢弃，
+     * 界面就报「MRZ 不完整」。整行重识别一次能直接拿到 30 字符。
+     */
+    private void rereadSplitLines(int[] img, int w, int h, List<Line> lines) {
+        if (lines.size() < 2) return;
+        List<Line> sorted = new ArrayList<>(lines);
+        Collections.sort(sorted, new Comparator<Line>() {
+            @Override public int compare(Line a, Line b) { return Float.compare(a.cy, b.cy); }
+        });
+
+        List<List<Line>> groups = new ArrayList<>();
+        for (Line l : sorted) {
+            List<Line> hit = null;
+            for (List<Line> g : groups) {
+                Line ref = g.get(0);
+                float hmax = Math.max(ref.h, l.h);
+                // 0.8 而不是 0.55：MRZ 的碎块常被底纹带偏几个像素，卡太紧会分不到一组
+                boolean sameRow = Math.abs(ref.cy - l.cy) < 0.8f * hmax;
+                boolean near = Math.abs(ref.cx - l.cx) < (ref.w + l.w) * 0.85f;
+                if (sameRow && near) { hit = g; break; }
+            }
+            if (hit != null) hit.add(l);
+            else {
+                List<Line> g = new ArrayList<>();
+                g.add(l);
+                groups.add(g);
+            }
+        }
+
+        for (List<Line> g : groups) {
+            int x0 = Integer.MAX_VALUE, y0 = Integer.MAX_VALUE, x1 = 0, y1 = 0;
+            StringBuilder joined = new StringBuilder();
+            for (Line l : g) {
+                x0 = Math.min(x0, l.box[0]);
+                y0 = Math.min(y0, l.box[1]);
+                x1 = Math.max(x1, l.box[2]);
+                y1 = Math.max(y1, l.box[3]);
+                joined.append(l.text);
+            }
+            boolean mrzLeft = mrzLeftFragment(joined.toString());
+            if (g.size() < 2 && !mrzLeft) continue;   // 单段只有"像 MRZ 左半段"才值得重试
+
+            x0 = Math.max(0, x0 - 2);
+            y0 = Math.max(0, y0 - 2);
+            x1 = Math.min(w, x1 + 2);
+            y1 = Math.min(h, y1 + 2);
+
+            // 真机日志（2.8）：MRZ 第 1 行只在左半段检出（x=254 w=183 ≈ 12 字符），右半段整块没出框。
+            // MRZ 是固定 30 字符的等宽行，按行高估算整行长度，把框向右扩出去再识别一次。
+            int bh = y1 - y0;
+            if (mrzLeft && x1 - x0 < bh * 12) {
+                int expX1 = Math.min(w, x0 + Math.round(bh * 20f));
+                if (expX1 > x1) x1 = expX1;
+            }
+
+            int bw = x1 - x0;
+            if (bw < 24 || bh < 6 || bh > h * 0.15f) continue;   // 太高说明跨了多行，不做
+            int[] crop = new int[bw * bh];
+            for (int y = 0; y < bh; y++) {
+                System.arraycopy(img, (y0 + y) * w + x0, crop, y * bw, bw);
+            }
+            Word word = recPair(crop, bw, bh, alnum, true, false, 1.0f);
+            if (word.mean < 0.5f || word.text.length() < 6) continue;
+            lines.add(new Line(word.text, word.mean, (x0 + x1) / 2f, (y0 + y1) / 2f,
+                    bw, bh, 0f, new int[]{x0, y0, x1, y1}, false, null, null));
+        }
+    }
+
+    /** 像 MRZ 的**左半段**（被截断的一行）：TD1 第 1 行前缀，或"6 位数字 + 性别位"。 */
+    private static boolean mrzLeftFragment(String s) {
+        if (s == null) return false;
+        String t = s.replace(" ", "").trim();
+        if (t.length() < 6 || t.length() >= 26) return false;   // 已经够长的不算"左半段"
+        if (t.startsWith("ID") || t.startsWith("I<") || t.startsWith("AC")
+                || t.startsWith("A<") || t.startsWith("C<")) return true;
+        for (int i = 0; i < 6; i++) if (t.charAt(i) < '0' || t.charAt(i) > '9') return false;
+        return t.length() >= 8 && (t.charAt(7) == 'M' || t.charAt(7) == 'F' || t.charAt(7) == '<');
+    }
+
+    /**
+     * 按水平条带直接识别（不经过 DBNet）。只收"结构像 MRZ"的结果，宁可少收也不误报。
+     *
+     * @param linesForLocate 整幅识别到的行，用来定位卡片下半部（可空）
+     */
+    private List<Line> scanMrzBands(int[] img, int w, int h, List<Line> linesForLocate) {
+        List<Line> out = new ArrayList<>();
+        float top = h * 0.42f, bottom = h;
+        if (linesForLocate != null && !linesForLocate.isEmpty()) {
+            float minY = Float.MAX_VALUE, maxY = -1;
+            for (Line l : linesForLocate) {
+                minY = Math.min(minY, l.cy);
+                maxY = Math.max(maxY, l.cy);
+            }
+            if (maxY > minY && maxY - minY > h * 0.08f) {
+                top = minY + (maxY - minY) * 0.50f;
+                bottom = Math.min(h, maxY + (maxY - minY) * 0.30f);
+            }
+        }
+        int yStart = Math.max(0, Math.round(top));
+        int yEnd = Math.min(h, Math.round(bottom));
+        // 条带高度按已检出行的中位行高定（固定 3.2% 图高在 2592x1944 上会跨两行，识别必然乱）
+        int bandH = Math.max(26, Math.round(h * 0.032f));
+        if (linesForLocate != null && !linesForLocate.isEmpty()) {
+            List<Float> hs = new ArrayList<>();
+            for (Line l : linesForLocate) if (l.h > 6f) hs.add(l.h);
+            if (!hs.isEmpty()) {
+                Collections.sort(hs);
+                bandH = Math.max(24, Math.round(hs.get(hs.size() / 2) * 1.35f));
+            }
+        }
+        int step = Math.max(10, Math.round(bandH * 0.5f));
+        long t0 = System.currentTimeMillis();
+        for (int y = yStart; y + bandH <= yEnd; y += step) {
+            if (System.currentTimeMillis() - t0 > 2500) break;
+            int[] band = new int[w * bandH];
+            System.arraycopy(img, y * w, band, 0, w * bandH);
+            float zoom = Math.min(2.0f, 1800f / w);
+            if (zoom < 1.0f) zoom = 1.0f;
+            int bw = Math.round(w * zoom), bh = Math.max(18, Math.round(bandH * zoom));
+            int[] z = resize(band, w, bandH, bw, bh);
+            Word word = recPair(z, bw, bh, alnum, true, false, 1.0f);
+            String t = CardFields.sanitizeMrz(word.text);
+            if (!mrzStructure(t)) continue;
+            out.add(new Line(t, word.mean, w / 2f, y + bandH / 2f, w, bandH, 0f,
+                    new int[]{0, y, w, y + bandH}, false, null, null));
+            if (out.size() >= 3) break;
+        }
+        return out;
+    }
+
+    /** MRZ 结构判定：TD1 第 1 行（ID/I&lt;/AC/A&lt;/C&lt; 开头）或第 2 行（前 6 位数字 + 第 8 位 M/F/&lt;）。 */
+    static boolean mrzStructure(String t) {
+        if (t == null || t.length() < 28) return false;
+        if (t.startsWith("ID") || t.startsWith("I<") || t.startsWith("AC")
+                || t.startsWith("A<") || t.startsWith("C<")) return true;
+        for (int i = 0; i < 6; i++) if (t.charAt(i) < '0' || t.charAt(i) > '9') return false;
+        if (t.length() < 8) return false;
+        char c = t.charAt(7);
+        return c == 'M' || c == 'F' || c == '<';
+    }
+
+    /** 看起来像 MRZ 行：≥24 个字符且 90% 落在 [0-9A-Z&lt;]。 */
+    static boolean looksLikeMrz(String s) {
+        if (s == null) return false;
+        String t = s.replace(" ", "").trim();
+        if (t.length() < 24) return false;
+        int ok = 0;
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '<') ok++;
+        }
+        return ok >= t.length() * 0.9;
+    }
+
+    private static int countMrzLike(List<Line> lines) {
+        int n = 0;
+        for (Line l : lines) if (looksLikeMrz(l.text)) n++;
+        return n;
+    }
+
     /** 把旋转后图像里的框映射回原图（旋转均为顺时针）。 */
     static int[] mapBoxBack(int[] box, int w, int h, int deg) {
         int[][] cs = {{box[0], box[1]}, {box[2], box[1]}, {box[0], box[3]}, {box[2], box[3]}};
@@ -288,9 +506,14 @@ public final class OcrCore {
 
     /** 整幅图「检测 → 逐行识别」，返回按阅读顺序排好的行。 */
     public List<Line> recognize(int[] argb, int w, int h) {
+        return recognize(argb, w, h, MAX_SIDE);
+    }
+
+    /** @param maxSide 检测前把最长边缩到这个值以内；二次识别（放大裁切）时传更大的值避免又被缩小。 */
+    public List<Line> recognize(int[] argb, int w, int h, int maxSide) {
         float scale = 1f;
         int m = Math.max(w, h);
-        if (m > MAX_SIDE) scale = MAX_SIDE / (float) m;
+        if (m > maxSide) scale = maxSide / (float) m;
         int sw = Math.max(32, Math.round(w * scale));
         int sh = Math.max(32, Math.round(h * scale));
         int[] small = argb;

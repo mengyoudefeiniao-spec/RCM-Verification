@@ -12,6 +12,9 @@ try {
     throw 'build/classes 不存在，请先运行 tools\build.ps1'
   }
   New-Item -ItemType Directory -Force -Path build\jvmtest, build\stats | Out-Null
+  # 每次清空 jvmtest：残留的旧 class 会盖住 build\classes（踩过两次：Liveness 的 tasks、
+  # OcrCore 的 recognizeCard —— 都表现为"NoSuchMethodError"，看着像代码没编译进去）
+  Remove-Item 'build\jvmtest\*' -Recurse -Force -ErrorAction SilentlyContinue
 
   Write-Host '=== 编译测试 ==='
   & "$env:JAVA_HOME\bin\javac.exe" -nowarn -encoding UTF-8 -cp $cp -d build\jvmtest tools\validate\JvmTest.java
@@ -47,7 +50,7 @@ try {
       Write-Host ("--- " + $img)
       $one = (& "$env:JAVA_HOME\bin\java.exe" "-Dfile.encoding=UTF-8" "-Dstdout.encoding=UTF-8" -cp "build\jvmtest;build\classes;$ortJar" OcrTest ("tools\fixtures\" + $img) 2>&1) -join "`n"
       $ocrOut = $ocrOut + "`n" + $img + "`n" + $one
-      ($one -split "`n" | Select-String -Pattern '行数|家庭编号|标签|MRZ 校验|家庭编号=') | ForEach-Object { "  " + $_ }
+      ($one -split "`n" | Select-String -Pattern '行数|家庭编号|标签|MRZ 校验|家庭编号=|auto:|card:') | ForEach-Object { "  " + $_ }
     }
   } else {
     Write-Host '  [skip] 未找到 Windows 版 onnxruntime jar（OCR 只能在手机上验证）'
@@ -59,6 +62,13 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'javac NfcTest failed' }
   $nfcOut = (& "$env:JAVA_HOME\bin\java.exe" "-Dfile.encoding=UTF-8" "-Dstdout.encoding=UTF-8" -cp "build\jvmtest;build\classes;$aj" NfcTest tools\fixtures\nfc-sample 2>&1) -join "`n"
   ($nfcOut -split "`n" | Where-Object { $_ -match 'FAIL|PASSED|FAILED' }) | ForEach-Object { $_ }
+
+  Write-Host ''
+  Write-Host '=== 离线二维码（自研编码器 + 独立解码校验）==='
+  & "$env:JAVA_HOME\bin\javac.exe" -nowarn -encoding UTF-8 -cp $cp -d build\jvmtest tools\validate\QrTest.java
+  if ($LASTEXITCODE -ne 0) { throw 'javac QrTest failed' }
+  $qrOut = (& "$env:JAVA_HOME\bin\java.exe" "-Dfile.encoding=UTF-8" "-Dstdout.encoding=UTF-8" -cp "build\jvmtest;$cp" QrTest 2>&1) -join "`n"
+  ($qrOut -split "`n" | Where-Object { $_ -match 'FAIL|PASSED|FAILED' }) | ForEach-Object { $_ }
 
   Write-Host ''
   Write-Host '=== 类级缺失扫描 ==='
@@ -89,8 +99,12 @@ try {
   Write-Host ''
   Write-Host '=== 交付 dex 覆盖检查（dexdump 权威类列表）==='
   Add-Type -AssemblyName System.IO.Compression.FileSystem
-  $apk = 'out\FaceVerify-offline.apk'
-  if (Test-Path $apk) {
+  # 检查"最近构建的那个包"：build.ps1 默认出 R50，-Model mbf 出 Lite；两个都是交付物。
+  # 写死 offline 会在只构建 lite 时误报（classes 是新的、APK 是旧的）。
+  $apk = (Get-ChildItem 'out\*.apk' -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+  if ($apk) { Write-Host ("checking " + $apk) }
+  if ($apk -and (Test-Path $apk)) {
     $z = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $apk))
     $e = $z.GetEntry('classes.dex')
     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, "$PWD\build\shipped.dex", $true)
@@ -119,6 +133,7 @@ try {
   if ($ok -notmatch '通过（误差 < 0.001px）') { $fail += 'Align.similarity' }
   if ($ok -notmatch 'finished=true passed=true done=3/3') { $fail += 'Liveness 正常通过' }
   if ($ok -notmatch '\(b\) 静止 60s：finished=false passed=false done=0') { $fail += 'Liveness 抗静态照片' }
+  if ($ok -notmatch 'turnPeak=0\.00 maxYaw=0\.90') { $fail += 'Liveness 峰值口径' }
   if (($depOut -join "`n") -notmatch '被引用但不存在的类 ===\s*\n\s*无') { $fail += '类级缺失扫描' }
   if (($loadOut -join "`n") -notmatch 'ALL CLASSES LOADABLE') { $fail += '全类加载' }
   if ($dexMissing -ne 0) { $fail += '交付 dex 覆盖' }
@@ -127,9 +142,13 @@ try {
     # 三张样本都要认对户号（每张至少出现 2 次：行文本 + 汇总行）
     if (([regex]::Matches($ocrOut, '1002E6996574360150')).Count -lt 6) { $fail += '卡背 OCR 家庭编号' }
     if ($ocrOut -notmatch 'doc=true dob=true exp=true') { $fail += '卡背 OCR MRZ 校验位' }
+  # 小卡片：卡宽 300px 时整幅识别会漏掉 MRZ，卡背专用补扫要能救回来
+  if ($ocrOut -notmatch 'auto: family=null mrzUsable=false') { $fail += '小卡片漏检复现' }
+  if ($ocrOut -notmatch 'card: family=\S* mrzUsable=true') { $fail += '小卡片 MRZ 补扫' }
     if ($ocrOut -notmatch 'OCR UNIT TESTS PASSED') { $fail += 'OCR 后处理单测' }
   }
   if ($nfcOut -notmatch 'NFC TESTS PASSED') { $fail += 'NFC/ICAO 协议栈' }
+  if ($qrOut -notmatch 'QR TESTS PASSED') { $fail += '离线二维码' }
   Write-Host ''
   if ($fail.Count -eq 0) {
     Write-Host 'ALL JVM TESTS PASSED'

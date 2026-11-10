@@ -273,9 +273,13 @@ public class VerifyActivity extends Activity implements CameraController.FrameLi
         sb.append("活体：通过（MediaPipe Face Mesh · blendshape 随机挑战）\n");
         Liveness.State ls = livenessState;
         if (ls != null) {
-            sb.append(String.format("  峰值 眨眼%.2f 转头%.2f 张嘴%.2f 微笑%.2f\n",
+            // 只把**抽到的**动作和它们的达成峰值列出来；没抽到的动作不再显示数字，
+            // 避免"没让转头却出现转头 0.04"（那是全程自然微动，不是判据）。
+            sb.append("  抽到动作：").append(ls.tasksText()).append('\n');
+            sb.append("  各动作峰值：").append(ls.peaksText()).append('\n');
+            sb.append(String.format("  全程峰值（含自然微动，不作判据）眨眼%.2f 转头%.2f 张嘴%.2f 微笑%.2f\n",
                     ls.maxBlink, ls.maxYaw, ls.maxJaw, ls.maxSmile));
-            sb.append("  动作 ").append(ls.log).append('\n');
+            sb.append("  动作时间线 ").append(ls.log).append('\n');
         }
         sb.append(String.format("融合 %d 帧 · 特征耗时 %dms · TTA %s\n",
                 frames, ms, RefStore.flipTta(this) ? "开" : "关"));
@@ -284,7 +288,7 @@ public class VerifyActivity extends Activity implements CameraController.FrameLi
         if (path != null) sb.append("\n调试图（参照 + 各帧对齐结果）：\n").append(path);
         detail.setText(sb.toString());
 
-        // 现场验证清单：把本次结果留在本机，供 ChecklistActivity 汇总（与网络无关）
+        // 技术验证实验室：把本次结果留在本机，供 LabActivity 汇总（与网络无关）
         try {
             org.json.JSONObject o = new org.json.JSONObject();
             o.put("model", App.I.modelId);
@@ -295,7 +299,11 @@ public class VerifyActivity extends Activity implements CameraController.FrameLi
             o.put("frames", frames);
             o.put("ms", ms);
             o.put("tta", RefStore.flipTta(this));
+            o.put("liveness", "passed");
             if (ls != null) {
+                // 抽到的动作 + 它们各自的达成峰值（判据用这一组）；下面四个是全程峰值，只作参考
+                o.put("tasks", ls.tasksText());
+                o.put("taskPeaks", ls.peaksText());
                 o.put("blink", Math.round(ls.maxBlink * 100) / 100.0);
                 o.put("yaw", Math.round(ls.maxYaw * 100) / 100.0);
                 o.put("jaw", Math.round(ls.maxJaw * 100) / 100.0);
@@ -303,7 +311,7 @@ public class VerifyActivity extends Activity implements CameraController.FrameLi
                 o.put("actions", android.text.TextUtils.join(" → ", ls.log));
             }
             o.put("montage", path == null ? "" : path);
-            ChecklistStore.putResult(this, "face", o);
+            LabStore.put(this, "face", o);
         } catch (Throwable ignored) {
         }
     }

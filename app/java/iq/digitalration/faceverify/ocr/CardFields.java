@@ -248,11 +248,41 @@ public final class CardFields {
         return t;
     }
 
+    /**
+     * 这一行是不是 MRZ（包括小图上只认出半截的情况）。
+     *
+     * <p>三种特征任一即可：含 {@code <<}；≥24 字符且 90% 落在 [0-9A-Z&lt;]；
+     * 或"6 位数字 + 第 8 位是 M/F/&lt;"（TD1 第 2 行被截断成 18 位时就是这种）。
+     * 户号格式是 4 数字 + 1 字母 + 13 位字母数字，前 6 位不可能全是数字，不会误伤。
+     */
+    private static boolean looksLikeMrzLine(String s) {
+        if (s == null) return false;
+        String t = s.replace(" ", "").trim();
+        if (t.isEmpty()) return false;
+        if (t.contains("<<")) return true;
+        if (t.length() >= 24) {
+            int ok = 0;
+            for (int i = 0; i < t.length(); i++) {
+                char c = t.charAt(i);
+                if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '<') ok++;
+            }
+            if (ok >= t.length() * 0.9) return true;
+        }
+        if (t.length() >= 8 && digits(t.substring(0, 6)) != null) {
+            char c = t.charAt(7);
+            if (c == 'M' || c == 'F' || c == '<') return true;
+        }
+        return false;
+    }
+
     private void findFamilyNo(List<OcrCore.Line> src, int labelIdx) {
         Cand best = null;
         List<Cand> all = new ArrayList<>();
         for (int i = 0; i < src.size(); i++) {
             OcrCore.Line l = src.get(i);
+            // MRZ 行（含被截断的片段）不参与户号提取：30 位 alnum 里截 18 位会拼出一个
+            // "看着合法"的假户号。卡太小、户号行没检出来时尤其容易踩到。
+            if (looksLikeMrzLine(l.text)) continue;
             Cand c = bestInLine(l);
             if (c == null) continue;
             if (labelIdx >= 0) {

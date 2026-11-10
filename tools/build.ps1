@@ -10,7 +10,7 @@ param(
   [ValidateSet('r50', 'mbf')] [string]$Model = 'r50',
   [ValidateSet('arm64', 'both')] [string]$Abi = 'arm64',
   [string]$Out = '',            # 留空 = 按模型自动命名（offline / lite）
-  [int]$VersionCode = 14,
+  [int]$VersionCode = 18,
   [string]$VersionName = '',    # 留空 = 按模型自动生成
   [string]$PackageSuffix = '',  # 留空 = 按模型自动取：r50 无后缀（沿用原包名，可覆盖升级）；mbf = .lite
   [string]$AppLabel = ''        # 留空 = 按模型自动取桌面显示名
@@ -67,7 +67,7 @@ $appId = $basePkg + $PackageSuffix
 
 if ([string]::IsNullOrWhiteSpace($AppLabel)) { $AppLabel = if ($Model -eq 'mbf') { '离线人脸核验 Lite' } else { '离线人脸核验 R50' } }
 if ([string]::IsNullOrWhiteSpace($Out)) { $Out = if ($Model -eq 'mbf') { 'FaceVerify-lite.apk' } else { 'FaceVerify-offline.apk' } }
-if ([string]::IsNullOrWhiteSpace($VersionName)) { $VersionName = if ($Model -eq 'mbf') { '2.4-checklist-lite' } else { '2.4-checklist-r50' } }
+if ([string]::IsNullOrWhiteSpace($VersionName)) { $VersionName = if ($Model -eq 'mbf') { '2.8-lab-lite' } else { '2.8-lab-r50' } }
 
 $abiList = if ($Abi -eq 'both') { @('arm64-v8a', 'armeabi-v7a') } else { @('arm64-v8a') }
 

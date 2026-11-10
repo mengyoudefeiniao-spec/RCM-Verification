@@ -56,7 +56,7 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     private ImageView preview;
     private TextView statusTv, familyTv, ocrTv, nfcTv, compareTv, logTv, hintTv;
     private ImageView faceIv;
-    private Button shotBtn, pickBtn, nfcBtn, manualBtn;
+    private Button shotBtn, pickBtn, nfcBtn, manualBtn, nfcLogBtn;
     private CameraController cam;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -65,10 +65,28 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     private volatile String mrzInfo;
     private volatile String ocrFamilyNo;
     private volatile String ocrDocNumber;
+    /** 本次读卡拿到的卡片 ATS/历史字节（写进日志，便于判断卡类型）。 */
+    private volatile String lastAts = "";
+    /** 最近一次读卡日志文件（可分享）。 */
+    private volatile java.io.File lastNfcLog;
+    /** 最近一次卡背 OCR 日志（每行原文，用于分析"看着清楚却不识别"）。 */
+    private volatile java.io.File lastOcrLog;
 
     private NfcAdapter nfcAdapter;
     private volatile boolean reading;
     private volatile boolean destroyed;
+    /** 单次读卡进行中（用于秒表，避免现场怀疑"没贴够时间"）。 */
+    private volatile boolean nfcBusy;
+    private volatile long nfcStartMs;
+
+    private final Runnable nfcTick = new Runnable() {
+        @Override public void run() {
+            if (!nfcBusy || destroyed) return;
+            long s = Math.max(0, (System.currentTimeMillis() - nfcStartMs) / 1000);
+            statusTv.setText("读卡中… 已 " + s + " 秒 · 保持贴合不要移动（读人像通常 5~15 秒）");
+            ui.postDelayed(this, 1000);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle b) {
@@ -244,14 +262,18 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
             for (Bitmap bmp : frames) {
                 if (busy && used >= 2) break;
                 long f0 = System.currentTimeMillis();
-                OcrCore.Scan scan = engine.scan(bmp);
+                // 第一帧做深度识别（下半部放大补扫 + 条带兜底），第二帧只做全图，
+                // 否则两帧都跑兜底会把一次识别拖到 20 秒以上
+                OcrCore.Scan scan = engine.scan(bmp, used == 0);
                 CardFields cf = CardFields.parse(scan.lines);
                 results.add(cf);
                 used++;
                 detail.append(String.format(Locale.US, "— 第 %d 帧 · 方向 %d° · %d 行 · %dms%n",
                         used, scan.rotation, scan.lines.size(), System.currentTimeMillis() - f0));
                 for (OcrCore.Line l : scan.lines) {
-                    detail.append(String.format(Locale.US, "   %4.0f%%  %s%n", l.conf * 100, l.text));
+                    // 带上框坐标：MRZ 被切碎时，只有坐标能判断"两段是不是同一行、聚类对不对"
+                    detail.append(String.format(Locale.US, "   %4.0f%%  %-42s x=%d y=%d w=%d h=%d%n",
+                            l.conf * 100, l.text, (int) l.cx, (int) l.cy, (int) l.w, (int) l.h));
                 }
                 if (cf.familyNo != null && cf.mrzUsable()) break;
             }
@@ -286,15 +308,18 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                 o.put("mrzUsable", cf.mrzUsable());
                 o.put("frames", framesUsed);
                 o.put("ms", ms);
-                ChecklistStore.putResult(this, "ocr", o);
+                LabStore.put(this, "ocr", o);
             } catch (Throwable ignored) {
             }
 
             ui.post(() -> {
                 busy = false;
+                boolean mrzChecksOk = cf.checkDocOk && cf.checkDobOk && cf.checkExpiryOk;
+                String mrzState = !cf.mrzUsable() ? "MRZ 不完整，可手输补全"
+                        : mrzChecksOk ? "MRZ 可用，可贴卡读芯片"
+                        : "MRZ 可用但校验位有误，读卡可能失败（建议手输）";
                 statusTv.setText((cf.familyNo != null ? "户号已识别" : "户号未识别")
-                        + " · " + (cf.mrzUsable() ? "MRZ 可用，可贴卡读芯片" : "MRZ 不完整，可手输补全")
-                        + "（" + framesUsed + " 帧 · " + ms + "ms）");
+                        + " · " + mrzState + "（" + framesUsed + " 帧 · " + ms + "ms）");
                 familyTv.setText(cf.familyNo == null ? "未识别到家庭编号" : cf.familyNo);
                 familyTv.setTextColor(cf.familyNo == null ? 0xFFFFB020 : 0xFF5FD4A0);
 
@@ -318,6 +343,10 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                 if (cf.mrzFound) {
                     r.append("MRZ：").append(cf.mrzLine1).append('\n').append("     ").append(cf.mrzLine2).append('\n');
                 }
+                if (!cf.mrzUsable()) {
+                    r.append("\n提示：MRZ 三行在卡片下部、字号很小。请把卡**靠近**手机（让卡片占满取景框）再拍一次；\n")
+                            .append("      仍读不到就用下面「手输 MRZ」填三项（证件号 / 出生 / 有效期），读芯片同样有效。\n");
+                }
                 ocrTv.setText(r.toString());
                 ocrTv.setVisibility(View.VISIBLE);
 
@@ -327,6 +356,8 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                     armReader(true);          // MRZ 一就绪就自动开着感应，贴卡即读
                 }
             });
+            // OCR 日志：每行原文 + 方向 + 耗时。现场"看着清楚却识别不到"时，这份日志是唯一的判断依据
+            lastOcrLog = LabStore.saveTextLog(this, "ocr-log", buildOcrLog(cf, detailText, framesUsed, ms));
             ui.post(() -> logTv.setText(detailText));
         } catch (Throwable t) {
             ui.post(() -> {
@@ -371,7 +402,9 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                 + "大多数机型在背面上半部/摄像头附近，贴上后会自动开始读取，不用点按钮。");
         nfcBtn.setText("② 正在感应…把卡贴上来");
         Bundle opts = new Bundle();
-        opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250);
+        // 平台每 N 毫秒做一次"卡还在不在"的探测。250ms 对部分 eMRTD 芯片太密：
+        // 探测本身会插一次 ISO-DEP 交互，遇到不喜欢的帧就可能把会话重置（现场表现成 TagLost）。
+        opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 600);
         try {
             nfcAdapter.enableReaderMode(this, tag -> onTag(tag),
                     NfcAdapter.FLAG_READER_NFC_A | NfcAdapter.FLAG_READER_NFC_B
@@ -404,11 +437,24 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
             return;
         }
         final String mrzi = mrzInfo;
+        nfcBusy = true;
+        nfcStartMs = System.currentTimeMillis();
+        ui.post(nfcTick);
         ui.post(() -> nfcTv.setText("已感应到芯片，正在建立安全通道…（保持贴合，读取人像需要 5~15 秒）"));
         boolean ok = false;
+        String atsText = "";
         try {
             iso.connect();
             iso.setTimeout(8000);
+            // 卡片类型诊断：ATS/历史字节能区分"读不到是卡太远"还是"卡片本身不按 ICAO 组织"
+            try {
+                byte[] hb = iso.getHistoricalBytes();
+                byte[] hi = iso.getHiLayerResponse();
+                atsText = (hb == null ? "" : DeviceKey.hex(hb))
+                        + (hi == null ? "" : (hb == null ? "" : " / ") + DeviceKey.hex(hi));
+            } catch (Throwable ignored) {
+            }
+            lastAts = atsText;
             IcaoReader.Result r = IcaoReader.read(new CardSession.Transport() {
                 @Override public byte[] transceive(byte[] command) throws Exception {
                     return iso.transceive(command);
@@ -421,7 +467,9 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
             }
             ui.post(() -> showNfcResult(r));
             if (!r.ok) {
-                ui.post(() -> nfcTv.append("\n\n重新把卡贴上来可以再试一次（仍在自动感应中）。"));
+                final String fAts = atsText;
+                ui.post(() -> nfcTv.append("\n\n重新把卡贴上来可以再试一次（仍在自动感应中）。"
+                        + (fAts.isEmpty() ? "" : "\n卡片 ATS/历史字节：" + fAts)));
             }
         } catch (Throwable t) {
             try {
@@ -429,17 +477,143 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
             } catch (Throwable ignored) {
             }
             final String msg = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : " " + t.getMessage());
+            final String fAts = atsText;
             ui.post(() -> nfcTv.setText("读卡中断：" + msg
+                    + (fAts.isEmpty() ? "" : "\n卡片 ATS/历史字节：" + fAts)
                     + "\n\n重新把卡贴上来可以再试一次（仍在自动感应中）。"));
         } finally {
+            nfcBusy = false;
             if (ok) ui.post(this::stopReader);
         }
     }
 
+    /** 读卡日志正文：设备 / 卡片 / 结果 / 每步日志 —— 失败时现场把这份 txt 发回来即可定位。 */
+    private String buildNfcLog(IcaoReader.Result r) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== 证件核验 · NFC 读卡日志 ===\n");
+        sb.append("时间：").append(DeviceInfo.now()).append('\n');
+        try {
+            android.content.pm.PackageInfo pi =
+                    getPackageManager().getPackageInfo(getPackageName(), 0);
+            sb.append("应用：").append(getPackageName()).append(' ')
+                    .append(pi.versionName).append(" (").append(pi.versionCode).append(")\n");
+        } catch (Throwable ignored) {
+            sb.append("应用：").append(getPackageName()).append('\n');
+        }
+        sb.append("设备：").append(android.os.Build.MANUFACTURER).append(' ')
+                .append(android.os.Build.MODEL).append(" / Android ")
+                .append(android.os.Build.VERSION.RELEASE).append(" / sdk ")
+                .append(android.os.Build.VERSION.SDK_INT).append('\n');
+        sb.append("AID：A0000002471001\n");
+        sb.append("MRZi：").append(mrzInfo == null ? "（未就绪）" : mrzInfo).append('\n');
+        sb.append("卡片 ATS/历史字节：")
+                .append(lastAts == null || lastAts.isEmpty() ? "（未取到）" : lastAts).append('\n');
+        sb.append("结果：").append(r.ok ? "成功" : "失败").append('\n');
+        if (!r.ok && r.error != null) sb.append("失败原因：").append(r.error).append('\n');
+        sb.append("安全通道：").append(r.accessControl == null ? "（未建立）" : r.accessControl).append('\n');
+        sb.append("APDU：").append(r.apduCount).append(" 条 · ").append(r.ms).append("ms\n");
+        sb.append("\n--- 步骤日志 ---\n");
+        for (String l : r.log) sb.append(l).append('\n');
+        return sb.toString();
+    }
+
+    /** 卡背 OCR 日志：设备 / 结果 / 每帧每行原文（"看着清楚却不识别"只能靠这份判断）。 */
+    private String buildOcrLog(CardFields cf, String detail, int frames, long ms) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== 证件核验 · 卡背 OCR 日志 ===\n");
+        sb.append("时间：").append(DeviceInfo.now()).append('\n');
+        try {
+            android.content.pm.PackageInfo pi =
+                    getPackageManager().getPackageInfo(getPackageName(), 0);
+            sb.append("应用：").append(getPackageName()).append(' ')
+                    .append(pi.versionName).append(" (").append(pi.versionCode).append(")\n");
+        } catch (Throwable ignored) {
+            sb.append("应用：").append(getPackageName()).append('\n');
+        }
+        sb.append("设备：").append(android.os.Build.MANUFACTURER).append(' ')
+                .append(android.os.Build.MODEL).append(" / Android ")
+                .append(android.os.Build.VERSION.RELEASE).append(" / sdk ")
+                .append(android.os.Build.VERSION.SDK_INT).append('\n');
+        sb.append("帧数：").append(frames).append(" · 耗时：").append(ms).append("ms\n");
+        sb.append("结果：户号=").append(cf.familyNo == null ? "未识别" : cf.familyNo)
+                .append("  MRZ可用=").append(cf.mrzUsable())
+                .append("  校验位(doc/dob/exp)=").append(cf.checkDocOk).append('/')
+                .append(cf.checkDobOk).append('/').append(cf.checkExpiryOk).append('\n');
+        sb.append("\n--- 每帧每行 OCR 原文（百分比 = 置信度）---\n").append(detail).append('\n');
+        return sb.toString();
+    }
+
+    /**
+     * 一键导出识别日志：把卡背 OCR 日志与 NFC 读卡日志合并成一份 txt，打成 zip 再分享。
+     * zip 是微信/邮件都认的形态（直接发 txt 时微信对 text/plain 的 content URI 支持不稳）。
+     */
+    private void shareDiagLog() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== 证件核验 · 识别日志（OCR + NFC）===\n");
+        sb.append("时间：").append(DeviceInfo.now()).append("\n\n");
+        boolean any = false;
+        if (lastOcrLog != null && lastOcrLog.isFile()) {
+            sb.append("--- 卡背 OCR 日志 ---\n").append(readText(lastOcrLog)).append('\n');
+            any = true;
+        }
+        java.io.File nfc = lastNfcLog != null ? lastNfcLog : LabStore.latestNfcLog(this);
+        if (nfc != null && nfc.isFile()) {
+            sb.append("--- NFC 读卡日志 ---\n").append(readText(nfc)).append('\n');
+            any = true;
+        }
+        if (!any) {
+            toast("还没有识别日志：先拍一次卡背，或贴卡读一次");
+            return;
+        }
+        java.io.File txt = LabStore.saveTextLog(this, "idcard-diag", sb.toString());
+        if (txt == null) {
+            toast("日志写入失败");
+            return;
+        }
+        java.io.File zip = LabStore.zipLog(this, txt);
+        final java.io.File send = zip != null ? zip : txt;
+        toast("日志已生成：\n" + send.getAbsolutePath());
+        try {
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType(zip != null ? "application/zip" : "text/plain");
+            i.putExtra(Intent.EXTRA_STREAM, ReportProvider.uriFor(this, send));
+            i.putExtra(Intent.EXTRA_SUBJECT, "证件核验识别日志 " + send.getName());
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(i, "发送识别日志"));
+        } catch (Throwable t) {
+            toast("没有可用的分享目标：" + t.getMessage() + "\n文件在：" + send.getAbsolutePath());
+        }
+    }
+
+    private static String readText(java.io.File f) {
+        try {
+            byte[] b = new byte[(int) f.length()];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            int n = 0;
+            while (n < b.length) {
+                int r = in.read(b, n, b.length - n);
+                if (r < 0) break;
+                n += r;
+            }
+            in.close();
+            return new String(b, 0, n, "UTF-8");
+        } catch (Throwable t) {
+            return "（读取失败：" + t.getMessage() + "）";
+        }
+    }
+
     private void showNfcResult(IcaoReader.Result r) {
+        // 顶部状态给一个"读卡用时"的结论：现场一眼能看出是"读完失败"还是"刚贴上就断"
+        statusTv.setText((r.ok ? "读卡完成 · " : "读卡失败 · ")
+                + r.ms + "ms · " + r.apduCount + " 条 APDU");
+        // 每次读卡（成功或失败）都落一份 txt：现场直接分享出来，随报告 ZIP 也会带上
+        lastNfcLog = LabStore.saveNfcLog(this, buildNfcLog(r));
+
         StringBuilder sb = new StringBuilder();
         if (!r.ok) {
             sb.append("✗ ").append(r.error == null ? "读取失败" : r.error).append('\n');
+            sb.append(String.format(Locale.US, "%d 条 APDU · %dms（在哪一步断的看下方日志）%n",
+                    r.apduCount, r.ms));
         } else {
             sb.append("✓ 读取成功 · ").append(r.accessControl).append('\n');
             sb.append(String.format(Locale.US, "%d 条 APDU · %dms%n", r.apduCount, r.ms));
@@ -611,9 +785,9 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                     }
                     o.put("compare", cmp);
 
-                    ChecklistStore.putResult(IdCardActivity.this, "nfc", o);
+                    LabStore.put(IdCardActivity.this, "nfc", o);
                     if ("JPEG".equals(r.doc.faceFormat) && r.doc.faceImage != null) {
-                        ChecklistStore.saveChipFace(IdCardActivity.this, r.doc.faceImage);
+                        LabStore.saveChipFace(IdCardActivity.this, r.doc.faceImage);
                     }
                 } catch (Throwable ignored) {
                 }
@@ -816,6 +990,12 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         nfcTv.setTextIsSelectable(true);
         nfcTv.setPadding(0, dp(8), 0, dp(4));
         col.addView(nfcTv);
+
+        // 识别日志一键导出：OCR 每行原文 + NFC 读卡步骤，合并成 zip（微信可直接发文件）
+        nfcLogBtn = smallButton("导出识别日志（OCR + 读卡，一键发微信）");
+        nfcLogBtn.setEnabled(true);
+        nfcLogBtn.setOnClickListener(v -> shareDiagLog());
+        col.addView(nfcLogBtn);
 
         faceIv = new ImageView(this);
         LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(dp(160), dp(200));

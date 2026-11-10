@@ -43,10 +43,18 @@ public final class OcrEngine {
     }
 
     public OcrCore.Scan scan(Bitmap bmp) {
+        return scan(bmp, true);
+    }
+
+    /**
+     * @param deep true = 卡背专用（MRZ 不足时放大补扫 + 条带兜底，慢）；
+     *             false = 只做全图识别（快，用于第二帧/已确认户号的场景）
+     */
+    public OcrCore.Scan scan(Bitmap bmp, boolean deep) {
         int w = bmp.getWidth(), h = bmp.getHeight();
         int[] px = new int[w * h];
         bmp.getPixels(px, 0, w, 0, 0, w, h);
-        return core.recognizeAuto(px, w, h);
+        return deep ? core.recognizeCard(px, w, h) : core.recognizeAuto(px, w, h);
     }
 
     public CardFields readCard(Bitmap bmp) {

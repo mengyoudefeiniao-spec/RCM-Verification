@@ -56,37 +56,52 @@ public final class IcaoReader {
             }
             res.log.add("应用 A0000002471001 已选中");
 
-            // ---- EF.CardAccess 必须在认证前读（里面是 PACE 参数）
-            step(progress, res, "读取 EF.CardAccess…");
-            byte[] cardAccess = null;
-            try {
-                cardAccess = session.readFile(EF_CARD_ACCESS);
-            } catch (Exception e) {
-                res.log.add("EF.CardAccess 读取失败（" + e.getMessage() + "），按无 PACE 处理");
-            }
-            List<Pace.Info> paceInfos = Pace.parseCardAccess(cardAccess);
-            for (Pace.Info i : paceInfos) res.log.add("芯片声明：" + i);
-            Pace.Info chosen = Pace.pick(paceInfos);
-
+            // ---- 先试 BAC（ICAO 9303-11 的老方案，兼容面最广）
+            //
+            // 现场教训（HONOR BVL-N49 / 2.8-lab-lite）：**先读 EF.CardAccess 会把会话弄死**。
+            // 日志显示芯片先回 6982（不开放 EF.CardAccess），紧接着下一条 APDU 就 TagLost，
+            // 全程只有 2 条 APDU / 349ms —— 也就是说"为了探测 PACE 先读 CardAccess"这一步
+            // 本身触发了芯片复位，后面的 BAC 根本没机会发出去。
+            // 所以改成 BAC 优先，PACE 只在 BAC 失败后再探测。
             boolean secured = false;
-            if (chosen != null) {
-                step(progress, res, "PACE 认证（" + chosen.oidText + "）…");
-                try {
-                    res.accessControl = Pace.establish(session, chosen, mrzi);
-                    secured = true;
-                } catch (Exception e) {
-                    res.log.add("PACE 失败：" + e.getMessage() + "，回退 BAC");
-                    // PACE 失败后芯片可能停在半路，重新选应用再走 BAC
-                    Apdu.Resp again = Apdu.parse(transport.transceive(Apdu.selectAid()));
-                    if (!again.ok()) throw new IllegalStateException("PACE 失败后无法重新选中应用：" + again.describe());
+            String bacError = null;
+            step(progress, res, "BAC 认证…");
+            try {
+                res.accessControl = Bac.establish(session, mrzi);
+                secured = true;
+            } catch (Exception e) {
+                bacError = e.getClass().getSimpleName() + "：" + e.getMessage();
+                boolean lost = e.getClass().getSimpleName().contains("TagLost")
+                        || (e.getMessage() != null && e.getMessage().contains("Tag was lost"));
+                if (lost) throw e;      // 物理断开，换通道也没意义，让上层提示重贴
+                res.log.add("BAC 失败（" + bacError + "），改试 PACE");
+                // 芯片可能停在半路，重选应用清状态
+                Apdu.Resp resel = Apdu.parse(transport.transceive(Apdu.selectAid()));
+                if (!resel.ok()) {
+                    throw new IllegalStateException("BAC 失败后无法重新选中应用：" + resel.describe());
                 }
-            } else if (cardAccess != null) {
-                res.log.add("芯片未声明可用的 PACE-ECDH-GM 参数，尝试 BAC");
             }
 
             if (!secured) {
-                step(progress, res, "BAC 认证…");
-                res.accessControl = Bac.establish(session, mrzi);
+                step(progress, res, "读取 EF.CardAccess（探测 PACE）…");
+                byte[] cardAccess = null;
+                try {
+                    // optional=true：芯片用 6982/6A82 回绝这个文件时当"不支持 PACE"，不显示成失败
+                    cardAccess = session.readFile(EF_CARD_ACCESS, true);
+                    if (cardAccess == null) {
+                        res.log.add("芯片不开放 EF.CardAccess（6A82/6982），无法走 PACE");
+                    }
+                } catch (Exception e) {
+                    res.log.add("EF.CardAccess 读取异常（" + e.getMessage() + "）");
+                }
+                List<Pace.Info> paceInfos = Pace.parseCardAccess(cardAccess);
+                for (Pace.Info i : paceInfos) res.log.add("芯片声明：" + i);
+                Pace.Info chosen = Pace.pick(paceInfos);
+                if (chosen == null) {
+                    throw new IllegalStateException("BAC 与 PACE 都不可用（BAC：" + bacError + "）");
+                }
+                step(progress, res, "PACE 认证（" + chosen.oidText + "）…");
+                res.accessControl = Pace.establish(session, chosen, mrzi);
                 secured = true;
             }
             res.log.add(res.accessControl);
@@ -145,10 +160,25 @@ public final class IcaoReader {
             res.ms = System.currentTimeMillis() - t0;
             step(progress, res, res.ok ? "完成" : "完成（无数据）");
         } catch (Throwable e) {
-            res.error = e.getClass().getSimpleName() + "：" + e.getMessage();
+            long ms = System.currentTimeMillis() - t0;
+            String simple = e.getClass().getSimpleName();
+            String raw = simple + "：" + e.getMessage();
+            String where = ms + "ms / " + session.apduCount + " 条 APDU";
+            if (simple.contains("TagLost") || (e.getMessage() != null && e.getMessage().contains("Tag was lost"))) {
+                // 关键：把"实际读了多久"写进提示。现场看到 349ms/2 条 APDU 就不会怀疑"没贴够 10 秒"
+                res.error = "读卡中断（TagLost）：本次只走了 " + where + " 就断了——"
+                        + "不是贴卡时间不够，是芯片侧会话被复位（选文件被拒、存在性探测、卡片移动都会这样）。"
+                        + "请把证件背面贴牢、读取过程中不要移动，重贴会自动再试一次。原始：" + raw;
+            } else if (simple.contains("IOException") || simple.contains("SecurityException")) {
+                res.error = "读卡中断（" + where + "）：" + raw
+                        + "（贴合不稳、手机壳太厚或卡片被复位都会这样；重贴再试一次）";
+            } else {
+                res.error = raw + "（" + where + "）";
+            }
             res.apduCount = session.apduCount;
-            res.ms = System.currentTimeMillis() - t0;
-            res.log.add("失败：" + res.error);
+            res.ms = ms;
+            // 原始错误始终留在日志里（现场截图就能定位），面向用户的提示放在 error 里
+            res.log.add("失败：" + raw + " @ " + where);
             step(progress, res, "失败");
         }
         res.log.addAll(session.log);
