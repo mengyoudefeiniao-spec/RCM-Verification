@@ -283,6 +283,29 @@ public class VerifyActivity extends Activity implements CameraController.FrameLi
         String path = saveMontage();
         if (path != null) sb.append("\n调试图（参照 + 各帧对齐结果）：\n").append(path);
         detail.setText(sb.toString());
+
+        // 现场验证清单：把本次结果留在本机，供 ChecklistActivity 汇总（与网络无关）
+        try {
+            org.json.JSONObject o = new org.json.JSONObject();
+            o.put("model", App.I.modelId);
+            o.put("modelDesc", App.I.modelDesc);
+            o.put("sim", Math.round(sim * 1000) / 1000.0);
+            o.put("thr", Math.round(thr * 1000) / 1000.0);
+            o.put("pass", pass);
+            o.put("frames", frames);
+            o.put("ms", ms);
+            o.put("tta", RefStore.flipTta(this));
+            if (ls != null) {
+                o.put("blink", Math.round(ls.maxBlink * 100) / 100.0);
+                o.put("yaw", Math.round(ls.maxYaw * 100) / 100.0);
+                o.put("jaw", Math.round(ls.maxJaw * 100) / 100.0);
+                o.put("smile", Math.round(ls.maxSmile * 100) / 100.0);
+                o.put("actions", android.text.TextUtils.join(" → ", ls.log));
+            }
+            o.put("montage", path == null ? "" : path);
+            ChecklistStore.putResult(this, "face", o);
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 把「参照 + 本次各帧的 112x112 对齐结果」拼成一张图存盘，便于远端肉眼判断对齐是否正常。 */

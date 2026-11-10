@@ -267,6 +267,29 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
             final String detailText = detail.toString();
             final int framesUsed = used;
 
+            // 现场验证清单：登记本次光学识别结果（纯本机文件）
+            try {
+                org.json.JSONObject o = new org.json.JSONObject();
+                o.put("familyNo", cf.familyNo == null ? "" : cf.familyNo);
+                o.put("familyConf", cf.familyConf);
+                o.put("familyLabel", cf.familyLabel == null ? "" : cf.familyLabel);
+                org.json.JSONArray alt = new org.json.JSONArray();
+                for (String a : cf.familyAlternatives) alt.put(a);
+                o.put("alternatives", alt);
+                o.put("docNumber", cf.docNumber == null ? "" : cf.docNumber);
+                o.put("dob", cf.dob == null ? "" : Mrz.fmtDate(cf.dob));
+                o.put("expiry", cf.expiry == null ? "" : Mrz.fmtDate(cf.expiry));
+                o.put("checkDoc", cf.checkDocOk);
+                o.put("checkDob", cf.checkDobOk);
+                o.put("checkExpiry", cf.checkExpiryOk);
+                o.put("mrzFound", cf.mrzFound);
+                o.put("mrzUsable", cf.mrzUsable());
+                o.put("frames", framesUsed);
+                o.put("ms", ms);
+                ChecklistStore.putResult(this, "ocr", o);
+            } catch (Throwable ignored) {
+            }
+
             ui.post(() -> {
                 busy = false;
                 statusTv.setText((cf.familyNo != null ? "户号已识别" : "户号未识别")
@@ -474,20 +497,26 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         // 光学 vs 芯片
         StringBuilder cmp = new StringBuilder();
         boolean any = false;
+        Boolean docMatch = null;
+        Boolean familyMatch = null;
+        String familyDiff = "";
         if (ocrDocNumber != null && m != null) {
             any = true;
+            docMatch = ocrDocNumber.equals(m.docNumber);
             cmp.append("证件号：光学 ").append(ocrDocNumber).append(" / 芯片 ").append(m.docNumber)
-                    .append(ocrDocNumber.equals(m.docNumber) ? "  ✓ 一致\n" : "  ✗ 不一致\n");
+                    .append(docMatch ? "  ✓ 一致\n" : "  ✗ 不一致\n");
         }
         if (ocrFamilyNo != null && !r.doc.person.personalNumber.isEmpty()) {
             any = true;
             String chipFam = CardFields.sanitizeFamily(r.doc.person.personalNumber);
             if (chipFam == null) chipFam = r.doc.person.personalNumber.trim();
+            familyMatch = ocrFamilyNo.equals(chipFam);
             cmp.append("家庭编号：光学 ").append(ocrFamilyNo).append(" / 芯片 ").append(chipFam).append(' ');
-            if (ocrFamilyNo.equals(chipFam)) {
+            if (familyMatch) {
                 cmp.append("✓ 一致\n");
             } else {
                 String diff = diffPositions(ocrFamilyNo, chipFam);
+                familyDiff = diff == null ? "" : diff;
                 cmp.append("✗ 不一致");
                 if (diff != null) {
                     // 只差 1~3 位 → 基本可以判定是 OCR 认错，芯片里的值是权威值
@@ -505,10 +534,91 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         }
         compareTv.setVisibility(any ? View.VISIBLE : View.GONE);
         compareTv.setText(any ? "【光学 vs 芯片】\n" + cmp : "");
+        saveNfcResult(r, docMatch, familyMatch, familyDiff);
 
         StringBuilder log = new StringBuilder();
         for (String l : r.log) log.append(l).append('\n');
         logTv.setText(log.toString());
+    }
+
+    /**
+     * 把这次芯片读取的结果登记到现场验证清单（本机 JSON，不联网）。
+     * 报告里要用的就是这几项：读卡是否成功、DG1/DG2/DG11 拿到什么、SOD 四项判定、光学与芯片是否一致。
+     */
+    private void saveNfcResult(final IcaoReader.Result r, final Boolean docMatch,
+                               final Boolean familyMatch, final String familyDiff) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    org.json.JSONObject o = new org.json.JSONObject();
+                    o.put("ok", r.ok);
+                    o.put("error", r.error == null ? "" : r.error);
+                    o.put("accessControl", r.accessControl == null ? "" : r.accessControl);
+                    o.put("apduCount", r.apduCount);
+                    o.put("ms", r.ms);
+
+                    Mrz m = r.doc.mrz;
+                    if (m != null) {
+                        org.json.JSONObject dg1 = new org.json.JSONObject();
+                        dg1.put("docNumber", m.docNumber);
+                        dg1.put("format", m.format);
+                        dg1.put("issuingState", m.issuingState);
+                        dg1.put("nationality", m.nationality);
+                        dg1.put("expiry", m.expiry);
+                        dg1.put("name", m.nameDisplay());
+                        dg1.put("checks", m.docNumberOk && m.dobOk && m.expiryOk);
+                        o.put("dg1", dg1);
+                    }
+                    if (r.doc.faceImage != null) {
+                        org.json.JSONObject dg2 = new org.json.JSONObject();
+                        dg2.put("format", r.doc.faceFormat);
+                        dg2.put("bytes", r.doc.faceImage.length);
+                        BitmapFactory.Options opt = new BitmapFactory.Options();
+                        opt.inJustDecodeBounds = true;
+                        try {
+                            BitmapFactory.decodeByteArray(r.doc.faceImage, 0, r.doc.faceImage.length, opt);
+                        } catch (Throwable ignored) {
+                        }
+                        dg2.put("decoded", opt.outWidth > 0);
+                        dg2.put("w", opt.outWidth);
+                        dg2.put("h", opt.outHeight);
+                        o.put("dg2", dg2);
+                    }
+                    if (!r.doc.person.personalNumber.isEmpty()) {
+                        org.json.JSONObject dg11 = new org.json.JSONObject();
+                        dg11.put("personalNumber", r.doc.person.personalNumber);
+                        dg11.put("fullDob", r.doc.person.fullDob);
+                        dg11.put("placeOfBirth", r.doc.person.placeOfBirth);
+                        dg11.put("address", r.doc.person.address);
+                        o.put("dg11", dg11);
+                    }
+                    if (r.sod != null) {
+                        org.json.JSONObject sod = new org.json.JSONObject();
+                        sod.put("signatureOk", r.sod.signatureOk);
+                        sod.put("dgHashesOk", r.sod.dgHashesOk);
+                        sod.put("dgMatched", r.sod.dgMatched);
+                        sod.put("dgVerified", r.sod.dgVerified);
+                        sod.put("chainOk", r.sod.chainOk);
+                        sod.put("certValidOk", r.sod.certValidOk);
+                        sod.put("hashAlg", r.sod.hashAlg == null ? "" : r.sod.hashAlg);
+                        o.put("sod", sod);
+                    }
+                    org.json.JSONObject cmp = new org.json.JSONObject();
+                    if (docMatch != null) cmp.put("docMatch", docMatch.booleanValue());
+                    if (familyMatch != null) {
+                        cmp.put("familyMatch", familyMatch.booleanValue());
+                        cmp.put("familyDiff", familyDiff == null ? "" : familyDiff);
+                    }
+                    o.put("compare", cmp);
+
+                    ChecklistStore.putResult(IdCardActivity.this, "nfc", o);
+                    if ("JPEG".equals(r.doc.faceFormat) && r.doc.faceImage != null) {
+                        ChecklistStore.saveChipFace(IdCardActivity.this, r.doc.faceImage);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }).start();
     }
 
     /** 逐位比较并描述差异（长度不同返回 null）。 */

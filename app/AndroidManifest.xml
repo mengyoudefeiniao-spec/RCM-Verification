@@ -65,5 +65,20 @@
             android:launchMode="singleTop"
             android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- 现场验证清单：证据汇总 + 结论 + 报告导出（v2.4） -->
+        <activity
+            android:name=".ChecklistActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- 报告 ZIP 分享：本工程没有 androidx，用自建只读 provider 代替 FileProvider。
+             authorities 由 tools/build.ps1 按实际包名重写（lite 包必须不同，否则两包不能共存）。 -->
+        <provider
+            android:name=".ReportProvider"
+            android:authorities="iq.digitalration.faceverify.reports"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

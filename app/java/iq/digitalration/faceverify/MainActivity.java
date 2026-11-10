@@ -197,6 +197,15 @@ public class MainActivity extends Activity {
         selftest.setOnClickListener(v -> runSelfTest());
         root.addView(selftest, fullWidth());
 
+        // ---- 现场验证 ----
+        root.addView(stepTitle("④ 现场验证清单"));
+        Button checklist = new Button(this);
+        checklist.setText("现场验证清单（证据汇总 + 报告导出）");
+        checklist.setTextSize(14);
+        checklist.setAllCaps(false);
+        checklist.setOnClickListener(v -> startActivity(new Intent(this, ChecklistActivity.class)));
+        root.addView(checklist, fullWidth());
+
         // ---- 参数 ----
         root.addView(stepTitle("参数"));
         thrTv = text("", 13, 0xFFCDD6E3);

@@ -10,7 +10,7 @@ param(
   [ValidateSet('r50', 'mbf')] [string]$Model = 'r50',
   [ValidateSet('arm64', 'both')] [string]$Abi = 'arm64',
   [string]$Out = '',            # 留空 = 按模型自动命名（offline / lite）
-  [int]$VersionCode = 11,
+  [int]$VersionCode = 14,
   [string]$VersionName = '',    # 留空 = 按模型自动生成
   [string]$PackageSuffix = '',  # 留空 = 按模型自动取：r50 无后缀（沿用原包名，可覆盖升级）；mbf = .lite
   [string]$AppLabel = ''        # 留空 = 按模型自动取桌面显示名
@@ -67,7 +67,7 @@ $appId = $basePkg + $PackageSuffix
 
 if ([string]::IsNullOrWhiteSpace($AppLabel)) { $AppLabel = if ($Model -eq 'mbf') { '离线人脸核验 Lite' } else { '离线人脸核验 R50' } }
 if ([string]::IsNullOrWhiteSpace($Out)) { $Out = if ($Model -eq 'mbf') { 'FaceVerify-lite.apk' } else { 'FaceVerify-offline.apk' } }
-if ([string]::IsNullOrWhiteSpace($VersionName)) { $VersionName = if ($Model -eq 'mbf') { '2.1-idcard-lite' } else { '2.1-idcard-r50' } }
+if ([string]::IsNullOrWhiteSpace($VersionName)) { $VersionName = if ($Model -eq 'mbf') { '2.4-checklist-lite' } else { '2.4-checklist-r50' } }
 
 $abiList = if ($Abi -eq 'both') { @('arm64-v8a', 'armeabi-v7a') } else { @('arm64-v8a') }
 
@@ -167,6 +167,15 @@ if ($mf.Contains('android:label="@string/app_name"')) {
   $mf = $mf.Replace('android:label="@string/app_name"', ('android:label="' + $labelXml + '"'))
 } else {
   Write-Host "    [warn] manifest 里没找到 android:label=""@string/app_name""，桌面名称未按模型区分"
+}
+# ReportProvider 的 authority 必须跟着包名走：两个包同时装时 authority 不能相同，
+# 否则后装的那个会因 provider 冲突装不上。代码里用 getPackageName()+".reports" 对照。
+$authorityBefore = 'android:authorities="iq.digitalration.faceverify.reports"'
+$authorityAfter = 'android:authorities="' + $appId + '.reports"'
+if ($mf.Contains($authorityBefore)) {
+  $mf = $mf.Replace($authorityBefore, $authorityAfter)
+} else {
+  Write-Host "    [warn] manifest 里没找到 ReportProvider 的 authority，分享功能可能不可用"
 }
 [System.IO.File]::WriteAllText((Join-Path $root 'build\AndroidManifest.xml'), $mf, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host ("    appId=" + $appId + "  label=" + $AppLabel)

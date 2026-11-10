@@ -44,7 +44,8 @@ for (const f of files) {
   present.add(rel.split('/').slice(1).join('/'));   // 去掉 jar 目录名
 }
 
-const ALLOW = ['java/', 'javax/', 'android/', 'androidx/', 'dalvik/', 'sun/', 'org/w3c/', 'org/xml/'];
+// org/json 与 apache 的 http 等是 android.jar 里的平台类，不在 build/deps 里，属于正常引用
+const ALLOW = ['java/', 'javax/', 'android/', 'androidx/', 'dalvik/', 'sun/', 'org/w3c/', 'org/xml/', 'org/json/'];
 for (const f of files) {
   const self = path.relative(root, f).replace(/\\/g, '/').replace(/\.class$/, '').split('/').slice(1).join('/');
   let pool;

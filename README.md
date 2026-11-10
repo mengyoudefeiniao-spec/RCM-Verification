@@ -19,6 +19,7 @@ v2.0 起两个包都包含**证件核验**（卡背 OCR + NFC 芯片），比 v1
 v2.1（versionCode 11）：拍卡改用后置摄像头、NFC 改为贴卡自动感应。
 v2.2（versionCode 12）：OCR 换成"英文/数字 + 阿拉伯文"双模型、白名单解码、二值化重试、认标签定位户号、MRZ 校验位反解、连拍两帧投票。
 v2.3（versionCode 13）：户号结构改为"4 数字 + 1 字母 + 13 字母数字"（真卡尾部会带字母）、多尺度集成识别、歧义位给候选值、可手工改正；读芯片后用 DG11 反校 OCR。
+v2.4（versionCode 14）：新增「现场验证清单」——把各能力**最近一次真实结果**、设备与安装包自证、结论与备注汇总成一张清单，一键导出 ZIP（`report.md` / `report.json` / `evidence.csv` / 调试图 / 芯片人像）并走系统分享发回。
 
 两个包是**两个不同的应用**（包名不同、桌面名称不同）：**可以同时装在一台手机上，后装的不再覆盖先装的**。
 数据目录按包名隔离，所以各自的参照照片、阈值、调试图互不干扰——正好可以拿同一批照片在两个版本上各跑一遍做对比。
@@ -206,6 +207,42 @@ pwsh -File tools\test.ps1     # 现有的人脸/对齐/活体 + 新增的两块
 4. **CSCA 主列表没做**。所以"被动认证"目前只能证明"数据与 SOD 一致、SOD 签名自洽"，
    不能证明证件由某国签发。
 
+## 现场验证清单（v2.4）
+
+主界面「④ 现场验证清单」进入。**不是让人手填一堆表**：人脸/活体在核验结束时、卡背 OCR 与 NFC 在读卡结束时
+都会把结果写进本机 `files/checklist/state.json`，这一页只负责把它们整理成"可给甲方看、可给我方复核"的证据。
+
+| 用例 | 清单条目 | 证据从哪来 |
+|---|---|---|
+| ENV-01 设备与运行环境 | TV-21 / TV-30 | 系统 API 直接读：机型、API、ABI、核心数、内存、存储、屏幕、相机、NFC |
+| INTEG-01 安装包完整性与签名 | TV-04（部分） | PackageManager：包名/版本/签名 SHA-256/安装来源/权限清单/Root 与模拟器迹象 |
+| FACE-01 1:1 人脸比对 | TV-03 | 核验结束自动登记：相似度、阈值、帧数、特征耗时、TTA、模型 |
+| LIVE-01 活体挑战 | TV-03 | 同上：四个 blendshape 峰值、动作序列 |
+| OCR-01 卡背家庭编号与 MRZ | TV-01 | 拍摄识别结束自动登记：户号、置信、候选、MRZ 三项校验位 |
+| NFC-01 读芯片与被动认证 | TV-02 / TV-29 | 读卡结束自动登记：访问控制、APDU 数、耗时、DG1/DG2/DG11、SOD 四项、光学 vs 芯片 |
+| OFFLINE-01 离线可用 | TV-25 / TV-30 | 权限清单里没有 INTERNET；飞行模式实测由人工确认 |
+| PERF-01 首启与推理耗时 | TV-30 | initMs、建模耗时、模型与安装包体积 |
+| SPOOF-01 被动反欺诈 | TV-28 | 如实记录"未集成被动模型"这一缺口 |
+| RTL-01 阿语 RTL | TV-22 | 本包界面为中文，通常选「不适用」 |
+
+结论四选一（可行 / 有条件可行 / 不可行 / 不适用）+ 一句备注，进度按"已出结论"计数。
+「导出验证报告」生成：
+
+```
+faceverify-verify-20261110-153012.zip
+├── report.md      人读：总览表 + 每项判据/做法/证据/结论 + 未覆盖条目 + 声明
+├── report.json    机读：完整快照（含原始 state）
+├── evidence.csv   逐项行，Excel 直接开
+├── device.json    设备与安装包快照
+├── state.json     本机采集原始记录
+├── debug/*.png    最近 8 张核验调试图
+└── chip/*.jpg     芯片 DG2 人像（JPEG 时另存）
+```
+
+ZIP 落在 `Android/data/<包名>/files/checklist-export/`，点「分享」走系统选择器（WhatsApp / 邮件 / 网盘）。
+**本工程没有 androidx，用不了 FileProvider**：`ReportProvider` 是自己写的只读 ContentProvider，
+authority 为 `<包名>.reports`，由 `tools/build.ps1` 在打包时按实际包名重写（两个包才能共存）。
+
 ## 技术方案
 
 | 环节 | 选型 | 为什么 |
@@ -289,6 +326,11 @@ app/java/iq/digitalration/faceverify/
     ImgUtil.java          YUV→ARGB(带旋转)、清晰度
     RefStore.java         参照特征持久化 + 参数
     IdCardActivity.java   证件核验界面（卡背 OCR + NFC 读芯片 + 光学/芯片一致性比对）
+    ChecklistActivity.java 现场验证清单界面（证据 / 结论 / 报告导出与分享）
+    Checklist.java         用例定义 + 证据汇总 + report.md / json / csv 生成
+    ChecklistStore.java    本机 JSON 状态（results / verdicts / meta）+ ZIP 导出
+    DeviceInfo.java        设备与安装包自证（机型/内存/存储/相机/签名/权限/Root）
+    ReportProvider.java    只读 ContentProvider，把导出 ZIP 交给分享目标
     ocr/
       OcrCore.java        PP-OCRv4 det+rec（纯 Java，可在 PC 上跑）
       CardFields.java     家庭编号纠错 + MRZ 提取（校验位重算）

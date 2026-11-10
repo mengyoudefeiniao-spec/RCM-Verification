@@ -570,11 +570,51 @@ MRZ 三项校验全过；耗时从 1.27s 增至 1.7s（PC，集成多跑 2 次�
 但如果真实卡面上尾部字母是常态（不止一个 M），更彻底的做法是拿一批真卡统计字母位置分布后写死规则，
 或与配给系统索要户号校验规则（若有）。
 
+## 现场验证清单模块（v2.4）
+
+把各项能力的结果汇总成一张清单并导出报告，新增 `Checklist*` / `DeviceInfo` / `ReportProvider` 五个类。
+
+编译与打包：
+
+```
+pwsh -File tools\build.ps1 -Model mbf   → out\FaceVerify-lite.apk     (72.0 MB, 2.4-checklist-lite/14)
+pwsh -File tools\build.ps1 -Model r50   → out\FaceVerify-offline.apk  (225.4 MB, 2.4-checklist-r50/14)
+```
+
+回归测试（`pwsh -File tools\test.ps1`）：
+
+```
+OCR UNIT TESTS PASSED (15)
+NFC TESTS PASSED (45)
+加载成功 3878 个，失败 0 个（共 3878）
+ALL CLASSES LOADABLE
+dex 类 4029 个 / 应包含 3878 个 / 缺失 0 个
+ALL JVM TESTS PASSED
+```
+
+清单与 provider（`aapt2 dump xmltree out\FaceVerify-lite.apk`）：
+
+```
+versionCode=14  versionName="2.4-checklist-lite"
+E: activity  name="...ChecklistActivity"  exported=false
+E: provider  name="...ReportProvider"     exported=false
+             authorities="iq.digitalration.faceverify.lite.reports"
+```
+
+→ authority 随包名由 `tools/build.ps1` 重写，标准版与精简版可以同时安装。
+
+**顺手修的测试基建**：`tools/depscan2.mjs` 的框架类白名单不含 `org/json/`，用了 `JSONObject` 之后会被误报成
+"被引用但不存在的类"；`org.json` 在 `android.jar` 里，已加入白名单。
+
+**未验证**：清单页在真机上的交互（对话框、结论按钮、分享面板里能否选到 WhatsApp 并带上 ZIP）、
+定制 ROM 上 `getInstallSourceInfo` / 签名读取的返回值、接收端打开 ZIP 的效果。以上只能上机确认。
+
 ## 没有验证的部分（不要当成已验证）
 
 | 项 | 状态 | 原因 |
 |---|---|---|
 | 真机运行 | **已验证（v1.7）** | 安装/启动/建模/活体 3 动作/1:1 比对全部跑通，无异常 |
+| 现场验证清单页（v2.4） | **未验证** | 无真机：只做了编译、JVM 全类加载、APK 清单反查与报告/ZIP 代码审查 |
 | 相机帧方向/帧率 | **未验证** | 依赖具体机型；已提供手动旋转开关 + 所见即算法所见 |
 | MediaPipe 关键点索引是否与预期一致 | **间接支持** | 用敏感度实验限制了最坏影响；有 5 点几何门控兜底 |
 | 伊拉克人群精度 | **未标定** | 无数据；App 内置评测模式可现场标定 |
