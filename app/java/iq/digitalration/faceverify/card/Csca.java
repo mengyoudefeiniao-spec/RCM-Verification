@@ -11,7 +11,7 @@ import java.util.Locale;
 import javax.security.auth.x500.X500Principal;
 
 /**
- * CSCA 信任锚（对应 gdis 的 {@code assets/njacsca.ncd} + {@code ChipInsp/icao/csca.c}）。
+ * CSCA 信任锚（信任模型见 ICAO Doc 9303 Part 12 / PKD MasterList）。
  *
  * <p>被动认证里「DS 证书能被 SOD 内的签发者验证」只说明**自洽**——中间人完全可以自己造一对
  * CSCA/DS 证书自签一份 SOD。要回答「这张证件由哪国签发」，必须拿 DS 的签发者去比对

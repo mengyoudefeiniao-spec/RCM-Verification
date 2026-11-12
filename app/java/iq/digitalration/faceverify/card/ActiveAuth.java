@@ -18,7 +18,7 @@ import java.util.Locale;
  * 可以被原样拷进另一颗芯片。AA 用芯片内部**不可导出**的私钥对随机数签名：
  * 芯片必须真的持有那把私钥，复制数据组是过不了这一步的。
  *
- * <p>流程（与 gdis 的 {@code ChipClient/icao/aa.c} 等价）：
+ * <p>流程（ICAO Doc 9303 Part 11「Active Authentication」，DG15 结构见 Part 10）：
  * <ol>
  *   <li>读 DG15：{@code 6F { 30 SubjectPublicKeyInfo }}；</li>
  *   <li>发 8 字节随机挑战 {@code 00 88 00 00 08 <challenge> 00}；</li>
