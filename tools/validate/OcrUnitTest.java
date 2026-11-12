@@ -101,6 +101,41 @@ public class OcrUnitTest {
         CardFields voted = CardFields.vote(frames);
         check("两帧投票修单字符错", "1002E6996574360150".equals(voted.familyNo), voted.familyNo);
 
+        // ---- 证件正面 CAN（Card Access Number）：右下角 6 位数字
+        List<OcrCore.Line> canLines = new ArrayList<>();
+        canLines.add(line("20220228", 500, 120, 0.90f));   // 8 位日期：长度不对
+        canLines.add(line("123456", 250, 120, 0.98f));     // 左上 6 位：可能是别的编号
+        canLines.add(line("654321", 900, 800, 0.85f));     // 右下 6 位：应该赢
+        canLines.add(line("ABC123", 600, 700, 0.99f));     // 非纯数字
+        List<String> cans = CardFields.canCandidates(canLines, 1000, 900);
+        check("CAN 优先右下角", !cans.isEmpty() && "654321".equals(cans.get(0)), String.valueOf(cans));
+
+        List<OcrCore.Line> arLines = new ArrayList<>();
+        arLines.add(line("١٢٣٤٥٦", 900, 800, 0.90f));      // 阿拉伯-印度数字要归一
+        List<String> arc = CardFields.canCandidates(arLines, 1000, 900);
+        check("CAN 阿拉伯数字归一", !arc.isEmpty() && "123456".equals(arc.get(0)), String.valueOf(arc));
+
+        List<OcrCore.Line> badCan = new ArrayList<>();
+        badCan.add(line("12345", 900, 800, 0.90f));
+        badCan.add(line("1234567", 900, 800, 0.90f));
+        check("CAN 长度过滤", CardFields.canCandidates(badCan, 1000, 900).isEmpty(), "");
+
+        // 8. 真实卡背（伊拉克国民卡：户号 1002L00M9770006805，MRZ 三行）
+        List<OcrCore.Line> real = new ArrayList<>();
+        real.add(line("الرقم العائلي / ژمارەی خێزانی", 800, 100, 0.92f));
+        real.add(line("1002L00M9770006805", 300, 100, 0.98f));
+        real.add(line("IDIRQAC67648836197662080255<<<", 500, 300, 0.99f));
+        real.add(line("7602067M2705088IRQ<<<<<<<<<<<5", 500, 330, 0.99f));
+        real.add(line("ALEQYLY<<ELY<<<<<<<<<<<<<<<<", 450, 360, 0.95f));
+        CardFields rc = CardFields.parse(real);
+        check("真实卡：户号", "1002L00M9770006805".equals(rc.familyNo), rc.familyNo);
+        check("真实卡：证件号", "AC6764883".equals(rc.docNumber), rc.docNumber);
+        check("真实卡：出生/有效期", "760206".equals(rc.dob) && "270508".equals(rc.expiry),
+                rc.dob + "/" + rc.expiry);
+        check("真实卡：校验位四项全过",
+                rc.checkDocOk && rc.checkDobOk && rc.checkExpiryOk && rc.checkCompositeOk, rc.summary());
+        check("真实卡：MRZi", "AC6764883676020672705088".equals(rc.mrzInfo()), rc.mrzInfo());
+
         System.out.println();
         System.out.println(fail == 0 ? "OCR UNIT TESTS PASSED (" + pass + ")" : "OCR UNIT TESTS FAILED: " + fail + "/" + (pass + fail));
         if (fail != 0) System.exit(1);

@@ -35,9 +35,15 @@ public final class Mrz {
         }
         String t = text.toUpperCase(Locale.US).replaceAll("[^A-Z0-9<]", "");
         m.raw = t;
-        if (t.length() >= 88) {
+        // 长度分发必须按"整倍数"判断：TD1 = 3×30 = 90，TD3 = 2×44 = 88，TD2 = 2×36 = 72。
+        // 旧代码把 >=88 一律当 TD1，护照（TD3，恰好 88 字符）会走进 parseTd1 的 substring(60,90)
+        // 直接抛 StringIndexOutOfBounds。
+        if (t.length() >= 89) {
             m.format = "TD1";
             m.parseTd1(t);
+        } else if (t.length() >= 88) {
+            m.format = "TD3";
+            m.parseTd3(t);
         } else if (t.length() >= 72) {
             m.format = "TD2";
             m.parseTd2(t);
@@ -95,6 +101,30 @@ public final class Mrz {
         expiryOk = expChk.equals(String.valueOf(checkDigit(expiry)));
         String composite = l1.substring(5, 30) + l2.substring(0, 7) + l2.substring(8, 15) + l2.substring(18, 29);
         compositeOk = l2.substring(29, 30).equals(String.valueOf(checkDigit(composite)));
+    }
+
+    /** TD3（护照，2×44）：第一行是证件类型/签发国/姓名，第二行是号码/日期/校验位。 */
+    private void parseTd3(String t) {
+        String l1 = t.substring(0, 44), l2 = t.substring(44, 88);
+        docCode = l1.substring(0, 2);
+        issuingState = l1.substring(2, 5);
+        name = l1.substring(5, 44);
+        docNumber = l2.substring(0, 9);
+        String docChk = l2.substring(9, 10);
+        nationality = l2.substring(10, 13);
+        dob = l2.substring(13, 19);
+        String dobChk = l2.substring(19, 20);
+        sex = l2.substring(20, 21);
+        expiry = l2.substring(21, 27);
+        String expChk = l2.substring(27, 28);
+        optionalData = l2.substring(28, 43);
+
+        docNumberOk = docChk.equals(String.valueOf(checkDigit(docNumber)));
+        dobOk = dobChk.equals(String.valueOf(checkDigit(dob)));
+        expiryOk = expChk.equals(String.valueOf(checkDigit(expiry)));
+        String composite = l2.substring(0, 10) + l2.substring(13, 20)
+                + l2.substring(21, 28) + l2.substring(28, 43);
+        compositeOk = l2.substring(43, 44).equals(String.valueOf(checkDigit(composite)));
     }
 
     private void parseTd2(String t) {

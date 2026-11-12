@@ -30,6 +30,8 @@ public final class CardFields {
     public String familyLabel;
 
     public String mrzLine1, mrzLine2;
+    /** TD1 第 3 行（姓名，30 字符，可空）。只用于展示/人工核对，不参与 BAC 密码。 */
+    public String mrzLine3;
     public String docNumber, dob, expiry, nationality, sex;
     public boolean checkDocOk, checkDobOk, checkExpiryOk, checkCompositeOk;
     public boolean mrzFound;
@@ -142,6 +144,7 @@ public final class CardFields {
             out.mrzFound = true;
             out.mrzLine1 = mrz.mrzLine1;
             out.mrzLine2 = mrz.mrzLine2;
+            out.mrzLine3 = mrz.mrzLine3;
             out.nationality = mrz.nationality;
             out.sex = mrz.sex;
             out.checkDocOk = out.docNumber != null && out.docNumber.equals(mrz.docNumber) && mrz.checkDocOk;
@@ -255,6 +258,51 @@ public final class CardFields {
      * 或"6 位数字 + 第 8 位是 M/F/&lt;"（TD1 第 2 行被截断成 18 位时就是这种）。
      * 户号格式是 4 数字 + 1 字母 + 13 位字母数字，前 6 位不可能全是数字，不会误伤。
      */
+    // ---------------------------------------------------------------- CAN（证件正面）
+
+    /**
+     * 从证件**正面**的识别结果里挑 CAN（Card Access Number）。
+     *
+     * <p>CAN 是 6 位数字，一般印在卡片正面**右下角**。同卡上还有别的数字（日期 8 位、编号 18 位），
+     * 但"6 位纯数字"并不唯一，所以按「越靠右下越优先 + 置信度」打分，返回排序后的候选由界面确认，
+     * 不硬选一个。
+     */
+    public static List<String> canCandidates(List<OcrCore.Line> lines, int imgW, int imgH) {
+        List<CanCand> cands = new ArrayList<>();
+        for (OcrCore.Line l : lines) {
+            String t = digitsOnly(l.text);
+            if (t.length() != 6) continue;
+            float px = imgW <= 0 ? 0.5f : Math.min(1f, Math.max(0f, l.cx / (float) imgW));
+            float py = imgH <= 0 ? 0.5f : Math.min(1f, Math.max(0f, l.cy / (float) imgH));
+            float score = 0.45f * l.conf + 0.35f * px + 0.20f * py;
+            if (px < 0.35f && py < 0.35f) score -= 0.15f;   // 左上角的多半是别的东西
+            cands.add(new CanCand(t, score));
+        }
+        cands.sort((a, b) -> Float.compare(b.score, a.score));
+        List<String> out = new ArrayList<>();
+        for (CanCand c : cands) if (!out.contains(c.value)) out.add(c.value);
+        return out.size() > 3 ? new ArrayList<>(out.subList(0, 3)) : out;
+    }
+
+    /** 只保留数字（阿拉伯-印度数字也归一成 0-9）。 */
+    private static String digitsOnly(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!Character.isDigit(c)) continue;
+            int v = Character.getNumericValue(c);
+            if (v >= 0 && v <= 9) sb.append((char) ('0' + v));
+        }
+        return sb.toString();
+    }
+
+    private static final class CanCand {
+        final String value;
+        final float score;
+        CanCand(String v, float s) { value = v; score = s; }
+    }
+
     private static boolean looksLikeMrzLine(String s) {
         if (s == null) return false;
         String t = s.replace(" ", "").trim();
@@ -519,6 +567,7 @@ public final class CardFields {
             cand.add(new OcrCore.Line(t, l.conf, l.cx, l.cy, l.w, l.h, l.angle, l.box, l.rtl));
         }
         if (cand.size() < 2) return;
+        List<OcrCore.Line> allCand = new ArrayList<>(cand);   // 过滤掉姓名行之前先留一份，第 3 行要从这里找
         // TD1 是三行：第一行证件类型(D)、第二行日期/性别、第三行姓名。姓名行几乎没有数字，
         // 先剔掉，否则会被当成日期行，docNumber/dob/expiry 全错。
         List<OcrCore.Line> withDigits = new ArrayList<>();
@@ -553,6 +602,23 @@ public final class CardFields {
             cand.sort((a, b) -> Float.compare(a.cy, b.cy));
             if (l1 == null) l1 = cand.get(0);
             if (l2 == null) l2 = cand.get(cand.get(0) == l1 ? 1 : 0);
+        }
+        // TD1 第 3 行（姓名行）：全是大写字母和 '<'、几乎没有数字、位置在第 2 行下面。
+        // 现场对照的另一个 App 也只扫这 3 行（界面上「姓名 SARH」就是第 3 行），补上便于人工核对；
+        // 但读芯片不依赖它——BAC 密码只用证件号/出生/有效期。
+        for (OcrCore.Line l : allCand) {
+            if (l == l1 || l == l2) continue;
+            if (l.cy < l2.cy - l2.h * 0.5f) continue;
+            int dg = 0, alpha = 0;
+            for (int i = 0; i < l.text.length(); i++) {
+                char c = l.text.charAt(i);
+                if (Character.isDigit(c)) dg++;
+                if (c == '<' || (c >= 'A' && c <= 'Z')) alpha++;
+            }
+            if (dg > 3) continue;
+            if (alpha < l.text.length() * 0.95) continue;
+            mrzLine3 = padTo(l.text, 30);
+            break;
         }
         mrzLine1 = padTo(l1.text, 30);
         mrzLine2 = padTo(l2.text, 30);

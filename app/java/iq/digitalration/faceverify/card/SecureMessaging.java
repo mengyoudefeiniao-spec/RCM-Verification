@@ -18,6 +18,8 @@ public final class SecureMessaging {
     private final int block;
     private final byte[] ksEnc, ksMac;
     private byte[] ssc;
+    /** §9.8.5：芯片用明文状态字回报安全通讯错误时，会话已终止。 */
+    private boolean terminated;
 
     public SecureMessaging(boolean aes, byte[] ksEnc, byte[] ksMac, byte[] ssc) {
         this.aes = aes;
@@ -42,6 +44,9 @@ public final class SecureMessaging {
 
     public byte[] ssc() { return ssc.clone(); }
 
+    /** 会话是否已被芯片终止（明文状态字回包）。 */
+    public boolean terminated() { return terminated; }
+
     private void sscIncrement() {
         for (int i = ssc.length - 1; i >= 0; i--) {
             ssc[i]++;
@@ -50,9 +55,12 @@ public final class SecureMessaging {
     }
 
     private byte[] mac(byte[] data) {
-        byte[] padded = Crypt.pad(data, block);
-        if (aes) return Crypt.aesCmac(ksMac, padded, 8);
-        return Crypt.retailMac(ksMac, padded);
+        // §9.8.6.2 / §9.8.7.2 对两种算法的"填充"要求不同：
+        //   3DES：ISO 9797-1 算法 3 自带填充方法 2，必须先把整个 MAC 输入补到 8 字节对齐；
+        //   AES ：CMAC（SP 800-38B）有自己的 10* 填充，**不能**预补 0x80 块，
+        //         否则算的是 CMAC(数据||80 00…) —— 加密数据块对齐时尤其明显。
+        if (aes) return Crypt.aesCmac(ksMac, data, 8);
+        return Crypt.retailMac(ksMac, Crypt.pad(data, 8));
     }
 
     private byte[] cbc(byte[] data, boolean encrypt) {
@@ -104,8 +112,10 @@ public final class SecureMessaging {
     public Apdu.Resp unwrap(byte[] rapdu) {
         Apdu.Resp outer = Apdu.parse(rapdu);
         if (outer.data.length == 0) {
-            // 裸响应：芯片没接受 SM，SSC 回退，保持与芯片同步
+            // 裸响应：芯片没接受 SM。§9.8.5 规定这是"安全通讯错误"，芯片已删除会话密钥，
+            // 所以这里标记终止，由 CardSession 把 SM 摘掉，避免后续命令继续按 SM 加密。
             sscDecrement();
+            terminated = true;
             return new Apdu.Resp(new byte[0], outer.sw);
         }
         sscIncrement();

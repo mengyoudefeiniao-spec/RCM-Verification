@@ -9,7 +9,6 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
 import android.nfc.tech.IsoDep;
@@ -53,6 +52,18 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     private static final int REQ_CAM = 3001;
     private static final int REQ_PICK = 3002;
 
+    /**
+     * ReaderMode 的"卡还在不在"探测间隔。设成很大 = 读卡期间关闭平台探测：
+     * 现场日志显示 600ms 的探测会在 BAC 刚开始时把 NFC-B 芯片的会话复位（TagLost @1.2s）。
+     */
+    private static final int PRESENCE_CHECK_MS = 10 * 60 * 1000;
+
+    /**
+     * IsoDep 单条 APDU 超时。Android 默认常为 1000ms，对 BAC 的 3DES 运算偏紧（弱机会超时），
+     * 现场用 8 秒：GET CHALLENGE / EXTERNAL AUTHENTICATE 正常都是毫秒级，留足余量只影响"真断链"的判定时间。
+     */
+    private static final int ISO_TIMEOUT_MS = 2000;
+
     private ImageView preview;
     private TextView statusTv, familyTv, ocrTv, nfcTv, compareTv, logTv, hintTv;
     private ImageView faceIv;
@@ -65,6 +76,8 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     private volatile String mrzInfo;
     private volatile String ocrFamilyNo;
     private volatile String ocrDocNumber;
+    /** 证件正面的 CAN（Card Access Number）；有些证件把 PACE 密码设成它。 */
+    private volatile String canCode = "";
     /** 本次读卡拿到的卡片 ATS/历史字节（写进日志，便于判断卡类型）。 */
     private volatile String lastAts = "";
     /** 最近一次读卡日志文件（可分享）。 */
@@ -75,6 +88,8 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     private NfcAdapter nfcAdapter;
     private volatile boolean reading;
     private volatile boolean destroyed;
+    /** 页面是否在后台：延迟重开 ReaderMode 时不能把感应开到后台去。 */
+    private volatile boolean paused;
     /** 单次读卡进行中（用于秒表，避免现场怀疑"没贴够时间"）。 */
     private volatile boolean nfcBusy;
     private volatile long nfcStartMs;
@@ -92,6 +107,7 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         nfcAdapter = NfcAdapter.getDefaultAdapter(this);   // buildUi 里要用它决定提示文案
+        canCode = getSharedPreferences("cfg", MODE_PRIVATE).getString("can", "");
         setContentView(buildUi());
         if (nfcAdapter == null) {
             nfcTv.setText("这台设备没有 NFC，只能做光学识别。");
@@ -169,6 +185,7 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     @Override
     protected void onResume() {
         super.onResume();
+        paused = false;
         if (cam == null && checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             initCamera();
         }
@@ -179,6 +196,7 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
     @Override
     protected void onPause() {
         super.onPause();
+        paused = true;
         stopReader();
     }
 
@@ -342,6 +360,10 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                         .append("   有效期校验：").append(cf.checkExpiryOk ? "✓" : "✗").append('\n');
                 if (cf.mrzFound) {
                     r.append("MRZ：").append(cf.mrzLine1).append('\n').append("     ").append(cf.mrzLine2).append('\n');
+                    if (cf.mrzLine3 != null) {
+                        r.append("     ").append(cf.mrzLine3).append('\n')
+                                .append("姓名(MRZ)：").append(nameFromMrz(cf.mrzLine3)).append('\n');
+                    }
                 }
                 if (!cf.mrzUsable()) {
                     r.append("\n提示：MRZ 三行在卡片下部、字号很小。请把卡**靠近**手机（让卡片占满取景框）再拍一次；\n")
@@ -402,9 +424,13 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                 + "大多数机型在背面上半部/摄像头附近，贴上后会自动开始读取，不用点按钮。");
         nfcBtn.setText("② 正在感应…把卡贴上来");
         Bundle opts = new Bundle();
-        // 平台每 N 毫秒做一次"卡还在不在"的探测。250ms 对部分 eMRTD 芯片太密：
-        // 探测本身会插一次 ISO-DEP 交互，遇到不喜欢的帧就可能把会话重置（现场表现成 TagLost）。
-        opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 600);
+        // 平台每 N 毫秒做一次"卡还在不在"的探测，探测会往 ISO-DEP 会话里插自己的低级命令。
+        // 现场日志（idcard-diag-20261110-172839，3.3-lite）：SELECT AID 已成功，BAC 的
+        // GET CHALLENGE 还没应答就 TagLost，全程 1175ms ≈ 2 × 原 600ms 探测周期——
+        // 用户明明贴了十几秒，断的是**平台探测**把这张 NFC-B 芯片的会话复位了。
+        // eMRTD 一次读卡只要 5~15 秒，读卡期间不需要平台帮忙看卡在不在（真被拿走时，
+        // 下一条 APDU 会抛 IOException，我们照样提示重贴），所以直接把间隔设成 10 分钟。
+        opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, PRESENCE_CHECK_MS);
         try {
             nfcAdapter.enableReaderMode(this, tag -> onTag(tag),
                     NfcAdapter.FLAG_READER_NFC_A | NfcAdapter.FLAG_READER_NFC_B
@@ -413,6 +439,23 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
             reading = false;
             nfcTv.setText("无法开启 NFC 感应：" + t.getMessage());
         }
+    }
+
+    /**
+     * 上一次读卡失败后重开一次感应。
+     *
+     * <p>读卡期间关掉了平台的"卡还在不在"探测，平台就不会自己重新发现还贴着的那张卡，
+     * 所以这里主动关一次再开：既保证"拿开再贴"一定再次回调 onTag，也顺手把上次的
+     * Tag 会话（已经 TagLost 的那个）清掉。
+     */
+    private void restartReader() {
+        ui.postDelayed(() -> {
+            if (destroyed || paused || mrzInfo == null) return;
+            CharSequence keep = nfcTv.getText();   // 失败原因留在屏幕上，别被"感应中"覆盖
+            stopReader();
+            armReader(false);
+            nfcTv.setText(keep);
+        }, 1500);   // 留出"把卡拿开再贴"的时间，卡还在场时也不会高频自旋
     }
 
     private void stopReader() {
@@ -445,7 +488,7 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         String atsText = "";
         try {
             iso.connect();
-            iso.setTimeout(8000);
+            iso.setTimeout(ISO_TIMEOUT_MS);
             // 卡片类型诊断：ATS/历史字节能区分"读不到是卡太远"还是"卡片本身不按 ICAO 组织"
             try {
                 byte[] hb = iso.getHistoricalBytes();
@@ -455,17 +498,40 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
             } catch (Throwable ignored) {
             }
             lastAts = atsText;
-            IcaoReader.Result r = IcaoReader.read(new CardSession.Transport() {
+            final CardSession.Transport tp = new CardSession.Transport() {
                 @Override public byte[] transceive(byte[] command) throws Exception {
                     return iso.transceive(command);
                 }
-            }, mrzi, text -> ui.post(() -> nfcTv.setText(text)));
+            };
+            IcaoReader.Result r = IcaoReader.read(tp, mrzi, text -> ui.post(() -> nfcTv.setText(text)),
+                    IcaoReader.MODE_AUTO, canCode);
+            // 重试策略严格按失败类型分流（不再按耗时猜）：
+            //   ① 通信异常/超时（TagLostException / IOException / APDU timeout）——芯片没给状态码，
+            //      上一轮 BAC 只是被"打断"而不是被"拒绝"，重连后**必须继续 BAC**；
+            //   ② 协议拒绝（明确状态码，如 6300 密钥错 / 6A81 不支持）——BAC 已被芯片否掉，
+            //      重连后可以跳过 BAC 直接探测 PACE（有 CAN 则先试 CAN）。
+            if (!r.ok && r.failureKind == IcaoReader.Result.FAIL_TRANSPORT) {
+                final boolean bacAlreadyRejected = "PACE".equals(r.failStage);   // 断在 PACE：上一轮 BAC 已被协议拒绝
+                try {
+                    iso.close();
+                    iso.connect();
+                    iso.setTimeout(ISO_TIMEOUT_MS);
+                    ui.post(() -> nfcTv.setText(bacAlreadyRejected
+                            ? "连接中断，重连后继续探测 PACE…"
+                            : "通信中断/超时（BAC 未完成），重连后继续 BAC…"));
+                    r = IcaoReader.read(tp, mrzi, text -> ui.post(() -> nfcTv.setText(text)),
+                            bacAlreadyRejected ? IcaoReader.MODE_PACE_ONLY : IcaoReader.MODE_AUTO, canCode);
+                } catch (Throwable ignored) {
+                    // 重连失败（卡已离开）：保留第一次的错误信息
+                }
+            }
             ok = r.ok;
             try {
                 iso.close();
             } catch (Throwable ignored) {
             }
-            ui.post(() -> showNfcResult(r));
+            final IcaoReader.Result fr = r;
+            ui.post(() -> showNfcResult(fr));
             if (!r.ok) {
                 final String fAts = atsText;
                 ui.post(() -> nfcTv.append("\n\n重新把卡贴上来可以再试一次（仍在自动感应中）。"
@@ -484,6 +550,7 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         } finally {
             nfcBusy = false;
             if (ok) ui.post(this::stopReader);
+            else ui.post(this::restartReader);     // 失败：重开感应，等用户拿开再贴
         }
     }
 
@@ -504,8 +571,12 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                 .append(android.os.Build.MODEL).append(" / Android ")
                 .append(android.os.Build.VERSION.RELEASE).append(" / sdk ")
                 .append(android.os.Build.VERSION.SDK_INT).append('\n');
+        sb.append("NFC 配置：IsoDep 超时 ").append(ISO_TIMEOUT_MS).append("ms · 存在性探测 ")
+                .append(PRESENCE_CHECK_MS).append("ms（读卡期间等于关闭）\n");
         sb.append("AID：A0000002471001\n");
         sb.append("MRZi：").append(mrzInfo == null ? "（未就绪）" : mrzInfo).append('\n');
+        sb.append("PACE 密码：").append(canCode == null || canCode.isEmpty()
+                ? "仅 MRZ（未填 CAN）" : "MRZ + CAN(" + canCode + ")").append('\n');
         sb.append("卡片 ATS/历史字节：")
                 .append(lastAts == null || lastAts.isEmpty() ? "（未取到）" : lastAts).append('\n');
         sb.append("结果：").append(r.ok ? "成功" : "失败").append('\n');
@@ -826,6 +897,12 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         }
     }
 
+    /** TD1 第 3 行的姓名：'<<' 分隔姓/名，单个 '<' 当空格。 */
+    private static String nameFromMrz(String line3) {
+        if (line3 == null) return "";
+        return line3.replace("<<", " / ").replace('<', ' ').trim();
+    }
+
     /** 户号手工改正：OCR 把 M 认成 4 这类错误人工一眼就能看出，给个输入框比反复重拍快。 */
     private void askFixFamily() {
         EditText et = new EditText(this);
@@ -888,6 +965,33 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                 .show();
     }
 
+    /**
+     * 手输 CAN（Card Access Number）——v2.9 起这是 CAN 的唯一入口（正面 OCR 已移除）。
+     *
+     * <p>ICAO 9303 允许芯片把 PACE 的密码设成 MRZ **或** 卡片正面的 CAN——
+     * 现场这张伊拉克证件就是"BAC 不应答 + EF.CardAccess 被 6982 挡住"，
+     * 而另一款能读出它的 App 提供了"手动输入 CAN 码"入口，说明它很可能走的是 PACE-CAN。
+     */
+    private void askCan() {
+        final EditText et = new EditText(this);
+        et.setInputType(InputType.TYPE_CLASS_TEXT);
+        et.setHint("证件正面的 CAN 码（通常 6 位数字）");
+        et.setText(canCode);
+        new AlertDialog.Builder(this)
+                .setTitle("输入 CAN 码")
+                .setMessage("有些证件把 PACE 密码设成卡片正面的 CAN。留空表示只用 MRZ 密码。"
+                        + "\n\nCAN 一般印在证件**正面**（照片那面）的角落，6 位数字。")
+                .setView(et)
+                .setPositiveButton("确定", (d, w) -> {
+                    canCode = et.getText().toString().trim();
+                    getSharedPreferences("cfg", MODE_PRIVATE).edit().putString("can", canCode).apply();
+                    toast(canCode.isEmpty() ? "已清空 CAN（只用 MRZ 密码）" : "已保存 CAN：" + canCode);
+                    if (mrzInfo != null) startReading();      // 立刻用新密码重试
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     // ---------------------------------------------------------------- UI
 
     private View buildUi() {
@@ -902,23 +1006,15 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         root.addView(preview, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // 取景提示框
-        FrameLayout guide = new FrameLayout(this);
-        View rect = new View(this);
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(0x00000000);
-        gd.setStroke(dp(2), 0x889CC4FF);
-        gd.setCornerRadius(dp(10));
-        rect.setBackground(gd);
+        // 取景参考线：整卡外框 + 家庭编号区 + MRZ 三行区（三道虚线，见 CardGuideView）
+        View guide = new CardGuideView(this);
         FrameLayout.LayoutParams rp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rp.leftMargin = dp(24);
-        rp.rightMargin = dp(24);
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        rp.leftMargin = dp(20);
+        rp.rightMargin = dp(20);
         rp.topMargin = dp(96);
         rp.bottomMargin = panelH + dp(8);
-        guide.addView(rect, rp);
-        root.addView(guide, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(guide, rp);
 
         // 顶部标题
         LinearLayout top = new LinearLayout(this);
@@ -928,7 +1024,7 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         TextView title = text("证件核验 · 卡背 OCR + NFC 芯片", 16, 0xFFF2F5FA);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         top.addView(title);
-        hintTv = text("把卡背放进取景框（竖着拍也可以），点「拍摄识别」", 12, 0xFF9CC4FF);
+        hintTv = text("整卡进蓝框 · 家庭编号进黄框 · 底部三行 MRZ 进绿框，再点「拍摄识别」", 12, 0xFF9CC4FF);
         hintTv.setPadding(0, dp(4), 0, 0);
         top.addView(hintTv);
         root.addView(top, new FrameLayout.LayoutParams(
@@ -972,6 +1068,11 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
         manualBtn = smallButton("手输 MRZ（OCR 读不全时）");
         manualBtn.setOnClickListener(v -> askManualMrz());
         col.addView(manualBtn);
+
+        // 有些证件把 PACE 密码设成卡片正面的 CAN（Card Access Number），只给 MRZ 是进不去的
+        Button canBtn = smallButton("输入 CAN 码（证件正面，PACE 密码常用）");
+        canBtn.setOnClickListener(v -> askCan());
+        col.addView(canBtn);
 
         Button fixFamily = smallButton("改正家庭编号（OCR 有歧义时）");
         fixFamily.setOnClickListener(v -> askFixFamily());

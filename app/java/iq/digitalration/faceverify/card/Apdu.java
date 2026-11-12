@@ -93,7 +93,8 @@ public final class Apdu {
         return cmd(chaining ? 0x10 : 0x00, 0x86, 0x00, 0x00, data, 0x00);
     }
 
+    /** BAC 的 EXTERNAL AUTHENTICATE：40 字节数据 + Le=0x28（现场卡按 case 4 收，标准表格是 case 3）。 */
     public static byte[] externalAuthenticate(byte[] data) {
-        return cmd(0x00, 0x82, 0x00, 0x00, data, 0x00);
+        return cmd(0x00, 0x82, 0x00, 0x00, data, 0x28);
     }
 }

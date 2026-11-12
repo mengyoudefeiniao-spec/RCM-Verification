@@ -10,7 +10,7 @@ param(
   [ValidateSet('r50', 'mbf')] [string]$Model = 'r50',
   [ValidateSet('arm64', 'both')] [string]$Abi = 'arm64',
   [string]$Out = '',            # 留空 = 按模型自动命名（offline / lite）
-  [int]$VersionCode = 18,
+  [int]$VersionCode = 32,
   [string]$VersionName = '',    # 留空 = 按模型自动生成
   [string]$PackageSuffix = '',  # 留空 = 按模型自动取：r50 无后缀（沿用原包名，可覆盖升级）；mbf = .lite
   [string]$AppLabel = ''        # 留空 = 按模型自动取桌面显示名
@@ -67,7 +67,7 @@ $appId = $basePkg + $PackageSuffix
 
 if ([string]::IsNullOrWhiteSpace($AppLabel)) { $AppLabel = if ($Model -eq 'mbf') { '离线人脸核验 Lite' } else { '离线人脸核验 R50' } }
 if ([string]::IsNullOrWhiteSpace($Out)) { $Out = if ($Model -eq 'mbf') { 'FaceVerify-lite.apk' } else { 'FaceVerify-offline.apk' } }
-if ([string]::IsNullOrWhiteSpace($VersionName)) { $VersionName = if ($Model -eq 'mbf') { '2.8-lab-lite' } else { '2.8-lab-r50' } }
+if ([string]::IsNullOrWhiteSpace($VersionName)) { $VersionName = if ($Model -eq 'mbf') { '3.12-lite' } else { '3.12-r50' } }
 
 $abiList = if ($Abi -eq 'both') { @('arm64-v8a', 'armeabi-v7a') } else { @('arm64-v8a') }
 
@@ -204,10 +204,14 @@ foreach ($s in $rjava) { $lines += '"' + $s.Replace('\','/') + '"' }
 if ($LASTEXITCODE -ne 0) { throw "javac failed ($LASTEXITCODE)" }
 
 Write-Host "[5/7] d8"
-$classFiles = Get-ChildItem (Join-Path $root 'build\classes') -Recurse -Filter *.class | ForEach-Object { $_.FullName.Substring($root.Length + 1) }
+# 不能把几千个 .class 逐个列进命令行：d8.bat 走 cmd.exe，超过 8191 字符会直接
+# "The input line is too long"（加一个 CardGuideView 就顶爆过）。先打成一个 jar 再传。
+$classesJar = Join-Path $root 'build\classes.jar'
+if (Test-Path $classesJar) { Remove-Item $classesJar -Force }
+[System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $root 'build\classes'), $classesJar)
 $d8args = @('--min-api', '24', '--lib', $aj, '--output', 'build/dex')
 foreach ($j in $depJarsRel) { $d8args += $j }
-foreach ($c in $classFiles) { $d8args += $c }
+$d8args += 'build/classes.jar'
 & $d8 @d8args
 if ($LASTEXITCODE -ne 0) { throw "d8 failed ($LASTEXITCODE)" }
 Write-Host ("    dex: " + ((Get-ChildItem (Join-Path $root 'build\dex') | ForEach-Object { $_.Name + ' ' + [math]::Round($_.Length/1MB,2) + 'MB' }) -join ', '))

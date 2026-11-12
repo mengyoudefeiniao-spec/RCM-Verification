@@ -76,6 +76,11 @@ public final class Crypt {
         return cbc("DESede/CBC/NoPadding", tdesKey(key16or24), iv, data, encrypt);
     }
 
+    /** 单 DES-CBC（8 字节密钥）：retail MAC 的第一步 CBC-MAC 必须用它，不能用 3DES。 */
+    public static byte[] desCbcSingle(byte[] key8, byte[] iv, byte[] data, boolean encrypt) {
+        return cbc("DES/CBC/NoPadding", key8, iv, data, encrypt);
+    }
+
     public static byte[] desEcbBlock(byte[] key8, byte[] block) {
         return cbc("DES/ECB/NoPadding", key8, null, block, true);
     }
@@ -104,7 +109,13 @@ public final class Crypt {
         }
     }
 
-    /** ISO 9797-1 MAC algorithm 3（retail MAC），输入必须 8 字节对齐。返回 8 字节。 */
+    /**
+     * ISO 9797-1 MAC algorithm 3（retail MAC）的**最后三步**（CBC-MAC → K2 解密 → K1 加密）。
+     *
+     * <p>输入必须已按 padding method 2 补齐（{@link #pad(byte[], int)}）且 8 字节对齐——
+     * BAC 的 E_IFD/M_IFD 是 32 字节对齐数据，**仍要补一个 0x80 块**，漏掉就会算出错误的 MAC
+     * （ICAO 9303-11 附录 D 向量：E_IFD 32 字节 → M_IFD 5F1448EEA8AD90A7）。
+     */
     public static byte[] retailMac(byte[] key16, byte[] data) {
         if (key16.length != 16) throw new IllegalArgumentException("retail MAC 需要 16 字节密钥");
         if (data.length == 0 || data.length % 8 != 0) {
@@ -112,7 +123,9 @@ public final class Crypt {
         }
         byte[] k1 = Arrays.copyOfRange(key16, 0, 8);
         byte[] k2 = Arrays.copyOfRange(key16, 8, 16);
-        byte[] cbc = desCbc(key16, new byte[8], data, true);
+        // 关键：CBC-MAC 用**单 DES + K1**，不是 3DES(K1,K2,K1)——用错会得到完全不同的 MAC，
+        // 芯片按"MAC 不对"直接复位会话（现场：EXTERNAL AUTHENTICATE 无响应 → TagLost）。
+        byte[] cbc = desCbcSingle(k1, new byte[8], data, true);
         byte[] last = Arrays.copyOfRange(cbc, cbc.length - 8, cbc.length);
         byte[] back = desBlockDecrypt(k2, last);
         return desEcbBlock(k1, back);

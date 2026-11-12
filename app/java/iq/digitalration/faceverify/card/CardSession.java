@@ -2,6 +2,7 @@ package iq.digitalration.faceverify.card;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 与芯片的一次会话：负责 APDU 传输、安全报文的开关、EF 文件的分块读取。
@@ -33,14 +34,39 @@ public final class CardSession {
         log.add("安全通道已建立（" + (sm == null ? "无" : "SM") + "）");
     }
 
+    /** 日志里最多打印前 N 条 APDU 的原始字节：够看清 PACE 的 MSE:Set AT / 各条 GA。 */
+    private static final int RAW_APDU_LIMIT = 30;
+    /** 单条 APDU 打印上限：DG2 的读块响应可能几百字节，全打会把日志刷爆。 */
+    private static final int RAW_APDU_BYTES = 64;
+
     /** 发一条 APDU（有 SM 时自动加/解保护）。data 为明文，le 为期望长度（null = 无 Le）。 */
     public Apdu.Resp send(int ins, int p1, int p2, byte[] data, Integer le) throws Exception {
         for (int attempt = 0; attempt < 2; attempt++) {
             byte[] cmd = sm == null ? Apdu.cmd(0x00, ins, p1, p2, data, le)
                     : sm.wrap(ins, p1, p2, data, le);
-            byte[] raw = transport.transceive(cmd);
+            // 先计数：超时/断开时这条其实已经发出去了，日志里"1 条 APDU"会误导成"没发命令"
             apduCount++;
-            Apdu.Resp r = sm == null ? Apdu.parse(raw) : sm.unwrap(raw);
+            // 前几条把**原始字节**记下来：现场读到一半断开时，只能靠它判断
+            //   #2 是不是 00 84 00 00 08（GET CHALLENGE）
+            //   #3 是不是 00 82 00 00 28 <40 字节> 28（EXTERNAL AUTHENTICATE，Lc=Le=0x28）
+            boolean raw = apduCount <= RAW_APDU_LIMIT;
+            if (raw) log.add("APDU #" + apduCount + " → " + hex(cmd));
+            byte[] rawResp;
+            try {
+                rawResp = transport.transceive(cmd);
+            } catch (Exception e) {
+                if (raw) log.add("APDU #" + apduCount + " ← 无响应：" + e.getClass().getSimpleName()
+                        + (e.getMessage() == null ? "" : " " + e.getMessage()));
+                throw e;
+            }
+            if (raw) log.add("APDU #" + apduCount + " ← " + hex(rawResp));
+            Apdu.Resp r = sm == null ? Apdu.parse(rawResp) : sm.unwrap(rawResp);
+            if (sm != null && sm.terminated()) {
+                // §9.8.5：芯片在识别到安全通讯错误时以明文状态字回包并终止会话，
+                // 这里必须把 SM 摘掉，否则后续命令还会按旧会话密钥加密，得到的全是 6982。
+                log.add("安全通讯已终止（芯片明文返回 " + r.swHex() + "）");
+                sm = null;
+            }
             if ((r.sw & 0xFF00) == Apdu.SW_WRONG_LE) {
                 // 6Cxx 只有明文阶段能安全重发：SM 下芯片的 SSC 与我们的计数已经错位，
                 // 重发必然 MAC 失败，所以直接抛给调用方（并给出芯片想要的长度）。
@@ -60,6 +86,40 @@ public final class CardSession {
     public Apdu.Resp send(byte[] cmd, boolean protectedAlready) throws Exception {
         if (sm != null || protectedAlready) throw new IllegalStateException("请用 send(ins,...)");
         return Apdu.parse(transport.transceive(cmd));
+    }
+
+    /**
+     * 指定 CLA 的明文命令（只用于 SM 建立之前）。
+     *
+     * <p>PACE 的 GENERAL AUTHENTICATE 在个别芯片上要求命令链（CLA=0x10），
+     * 而 {@link #send(int, int, int, byte[], Integer)} 固定用 0x00，所以单开一个入口做兼容重试。
+     */
+    public Apdu.Resp sendPlain(int cla, int ins, int p1, int p2, byte[] data, Integer le) throws Exception {
+        if (sm != null) throw new IllegalStateException("SM 已建立，不能用明文 CLA 覆盖");
+        apduCount++;
+        byte[] cmd = Apdu.cmd(cla, ins, p1, p2, data, le);
+        boolean raw = apduCount <= RAW_APDU_LIMIT;
+        if (raw) log.add("APDU #" + apduCount + " → " + hex(cmd));
+        byte[] rawResp;
+        try {
+            rawResp = transport.transceive(cmd);
+        } catch (Exception e) {
+            if (raw) log.add("APDU #" + apduCount + " ← 无响应：" + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : " " + e.getMessage()));
+            throw e;
+        }
+        if (raw) log.add("APDU #" + apduCount + " ← " + hex(rawResp));
+        return Apdu.parse(rawResp);
+    }
+
+    /** 十六进制（超长截断并标注总长），日志用；纯 Java，JVM 单测也能跑。 */
+    private static String hex(byte[] b) {
+        if (b == null) return "(null)";
+        int n = Math.min(b.length, RAW_APDU_BYTES);
+        StringBuilder sb = new StringBuilder(n * 2 + 8);
+        for (int i = 0; i < n; i++) sb.append(String.format(Locale.US, "%02X", b[i] & 0xFF));
+        if (b.length > n) sb.append("…(").append(b.length).append("B)");
+        return sb.toString();
     }
 
     /** 选 EF 并读完整个文件（按 TLV 头里的长度分块）。文件不存在返回 null。 */

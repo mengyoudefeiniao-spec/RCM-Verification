@@ -13,6 +13,7 @@ import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,14 @@ import java.util.Map;
 public class NfcTest {
 
     static int pass = 0, fail = 0;
+
+    /** 在假芯片记录的 C-APDU 列表里按十六进制找第一条，返回下标（找不到 -1）。 */
+    static int indexOfCmd(VirtualCard vc, String hex) {
+        for (int i = 0; i < vc.cmds.size(); i++) {
+            if (Tlv.hex(vc.cmds.get(i)).equals(hex)) return i;
+        }
+        return -1;
+    }
 
     static void check(String name, boolean ok, String detail) {
         if (ok) {
@@ -53,6 +62,17 @@ public class NfcTest {
         check("Kseed", Tlv.hex(ks).equals("239AB9CB282DAF66231DC5A4DF6BFBAE"), Tlv.hex(ks));
         check("Kenc", Tlv.hex(kEnc).equals("AB94FDECF2674FDFB9B391F85D7F76F2"), Tlv.hex(kEnc));
         check("Kmac", Tlv.hex(kMac).equals("7962D9ECE03D1ACD4C76089DCE131543"), Tlv.hex(kMac));
+
+        // ICAO 9303-11 附录 D 的 EXTERNAL AUTHENTICATE 示例：验证 E_IFD / M_IFD 的加密与 retail MAC。
+        // 假芯片用的是同一套 Crypt 实现，只靠"假芯片能通"证明不了算法对，必须对官方向量。
+        byte[] vRndIc = Tlv.unhex("4608F91988702212");
+        byte[] vRndIfd = Tlv.unhex("781723860C06C226");
+        byte[] vKifd = Tlv.unhex("0B795240CB7049B01C19B33E32804F0B");
+        byte[] vPlain = Crypt.concat(vRndIfd, vRndIc, vKifd);
+        String eIfd = Tlv.hex(Crypt.desCbc(kEnc, new byte[8], vPlain, true));
+        String mIfd = Tlv.hex(Crypt.retailMac(kMac, Crypt.pad(Tlv.unhex(eIfd), 8)));
+        check("E.IFD", eIfd.equals("72C29C2371CC9BDB65B779B8E8D37B29ECC154AA56A8799FAE2F498F76ED92F2"), eIfd);
+        check("M.IFD", mIfd.equals("5F1448EEA8AD90A7"), mIfd);
 
         System.out.println("=== 1b. 可选文件（EF.CardAccess）的拒绝码语义 ===");
         // 现场实测：伊拉克 eMRTD 对 SELECT EF.CardAccess(011C) 回 6982（安全状态不满足），
@@ -130,6 +150,16 @@ public class NfcTest {
         check("MRZi", "AE0644356291051262707244".equals(m.mrzInfo()), m.mrzInfo());
         check("姓名", m.nameDisplay().contains("ALDAWDY"), m.nameDisplay());
 
+        System.out.println("=== 4b. MRZ（TD3 护照样本，2×44，ICAO 附录示例）===");
+        Mrz m3 = Mrz.parse("P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<"
+                + "L898902C36UTO7408122F1204159ZE184226B<<<<<10");
+        check("格式", "TD3".equals(m3.format), m3.format);
+        check("证件号", "L898902C3".equals(m3.docNumber) && m3.docNumberOk, m3.docNumber);
+        check("出生/有效期", "740812".equals(m3.dob) && m3.dobOk
+                && "120415".equals(m3.expiry) && m3.expiryOk, m3.dob + "/" + m3.expiry);
+        check("综合校验位", m3.compositeOk, "");
+        check("MRZi", "L898902C3674081221204159".equals(m3.mrzInfo()), m3.mrzInfo());
+
         System.out.println("=== 5. EF.SOD 被动认证 ===");
         Map<Integer, byte[]> dgs = new HashMap<>();
         dgs.put(1, dg1);
@@ -170,15 +200,165 @@ public class NfcTest {
                 r1.sod == null ? "null" : r1.sod.summary());
         check("EF.COM 数据组", r1.doc.dgList.size() == 3, String.valueOf(r1.doc.dgList));
 
+        System.out.println("=== 4c. 真实卡（伊拉克国民卡）MRZ → BAC 密钥 ===");
+        Mrz m4 = Mrz.parse("IDIRQAC67648836197662080255<<<"
+                + "7602067M2705088IRQ<<<<<<<<<<<5"
+                + "ALEQYLY<<ELY<<<<<<<<<<<<<<<<<<");
+        check("格式/证件号", "TD1".equals(m4.format) && "AC6764883".equals(m4.docNumber), m4.format + " " + m4.docNumber);
+        check("出生/有效期", "760206".equals(m4.dob) && "270508".equals(m4.expiry), m4.dob + "/" + m4.expiry);
+        check("MRZi", "AC6764883676020672705088".equals(m4.mrzInfo()), m4.mrzInfo());
+        byte[] ks4 = new byte[16];
+        System.arraycopy(Crypt.sha1(m4.mrzInfo().getBytes("US-ASCII")), 0, ks4, 0, 16);
+        check("Kseed", "738D010B58A3E1C224625B3637CCF8E7".equals(Tlv.hex(ks4)), Tlv.hex(ks4));
+        check("Kenc", "C7948F2F9D7A7FE31986DCEC324CD575".equals(Tlv.hex(Crypt.kdf(ks4, 1, false, 112))),
+                Tlv.hex(Crypt.kdf(ks4, 1, false, 112)));
+        check("Kmac", "EF0D520DBC078A86D0C79D68B064D54C".equals(Tlv.hex(Crypt.kdf(ks4, 2, false, 112))),
+                Tlv.hex(Crypt.kdf(ks4, 2, false, 112)));
+
         System.out.println("=== 7. 假芯片：PACE-ECDH-GM-AES-128 全流程 ===");
+        VirtualCard.mfSelected = false;
         IcaoReader.Result r2 = IcaoReader.read(new VirtualCard(dir, true), m.mrzInfo(), text -> { });
         for (String l : r2.log) System.out.println("       · " + l);
         check("读取成功", r2.ok, r2.error);
         check("安全通道", r2.accessControl.startsWith("PACE"), r2.accessControl);
+        check("EF.CardAccess 从主文件读（§9.2.11）", VirtualCard.mfSelected, "没有 SELECT MF");
         check("DG1 MRZ", r2.doc.mrz != null && "AE0644356".equals(r2.doc.mrz.docNumber), "");
         check("DG2 人像", r2.doc.faceImage != null && r2.doc.faceImage.length > 1000, r2.faceInfo());
         check("被动认证", r2.sod != null && r2.sod.signatureOk && r2.sod.dgHashesOk,
                 r2.sod == null ? "null" : r2.sod.summary());
+
+        System.out.println("=== 7b. 假芯片：无 EF.CardAccess 时 PACE 盲试（显式 PACE_ONLY）===");
+        IcaoReader.Result r4 = IcaoReader.read(new VirtualCard(dir, true, false), m.mrzInfo(),
+                text -> { }, IcaoReader.MODE_PACE_ONLY);
+        for (String l : r4.log) System.out.println("       · " + l);
+        check("读取成功（盲试）", r4.ok, r4.error);
+        check("安全通道", r4.accessControl != null && r4.accessControl.startsWith("PACE"), r4.accessControl);
+
+        System.out.println("=== 7c. 假芯片：MODE_PACE_ONLY（BAC 超时后跳过 BAC）===");
+        IcaoReader.Result r5 = IcaoReader.read(new VirtualCard(dir, true), m.mrzInfo(),
+                text -> { }, IcaoReader.MODE_PACE_ONLY);
+        for (String l : r5.log) System.out.println("       · " + l);
+        check("读取成功（跳过 BAC）", r5.ok, r5.error);
+        check("安全通道", r5.accessControl != null && r5.accessControl.startsWith("PACE"), r5.accessControl);
+
+        System.out.println("=== 7d. 假芯片：PACE 密码用 CAN（不是 MRZ）===");
+        VirtualCard.CAN = "123456";
+        IcaoReader.Result r6 = IcaoReader.read(new VirtualCard(dir, true, false), m.mrzInfo(),
+                text -> { }, IcaoReader.MODE_PACE_ONLY, "123456");
+        for (String l : r6.log) System.out.println("       · " + l);
+        check("读取成功（PACE-CAN）", r6.ok, r6.error);
+        check("安全通道", r6.accessControl != null && r6.accessControl.contains("CAN"), r6.accessControl);
+        VirtualCard.CAN = "";
+
+        System.out.println("=== 7e. 现场卡形态：有 CAN 也必须 BAC 优先，且全程不碰 EF.CardAccess ===");
+        VirtualCard.breakPace = true;            // PACE 一旦被尝试就必失败（复现现场 6800）
+        VirtualCard.cardAccessTouched = false;
+        IcaoReader.Result r7 = IcaoReader.read(new VirtualCard(dir, false), m.mrzInfo(),
+                text -> { }, IcaoReader.MODE_AUTO, "317584");
+        for (String l : r7.log) System.out.println("       · " + l);
+        boolean noPace = true;
+        for (String l : r7.log) if (l.contains("PACE 盲试")) noPace = false;
+        check("读取成功（BAC 优先）", r7.ok, r7.error);
+        check("安全通道是 BAC", r7.accessControl != null && r7.accessControl.startsWith("BAC"), r7.accessControl);
+        check("没有走 PACE 盲试", noPace, "");
+        check("先探测了 EF.CardAccess（PACE 优先）", VirtualCard.cardAccessTouched, "");
+        VirtualCard.breakPace = false;
+
+        System.out.println("=== 7f. 通信中断分类：BAC 阶段 TagLost → FAIL_TRANSPORT / stage=BAC ===");
+        VirtualCard.failBacTransport = true;
+        IcaoReader.Result r8 = IcaoReader.read(new VirtualCard(dir, false), m.mrzInfo(),
+                text -> { }, IcaoReader.MODE_AUTO, null);
+        for (String l : r8.log) System.out.println("       · " + l);
+        check("失败分类=通信中断", r8.failureKind == IcaoReader.Result.FAIL_TRANSPORT,
+                "kind=" + r8.failureKind);
+        check("失败阶段=BAC", "BAC".equals(r8.failStage), r8.failStage);
+        VirtualCard.failBacTransport = false;
+
+        System.out.println("=== 7g. 盲试提前退出：首个 General Authenticate 6800 立即停 ===");
+        VirtualCard.breakPace = true;
+        IcaoReader.Result r9 = IcaoReader.read(new VirtualCard(dir, true, false), m.mrzInfo(),
+                text -> { }, IcaoReader.MODE_PACE_ONLY, null);
+        for (String l : r9.log) System.out.println("       · " + l);
+        boolean stopped = false;
+        for (String l : r9.log) if (l.contains("停止盲试")) stopped = true;
+        check("失败分类=协议拒绝", r9.failureKind == IcaoReader.Result.FAIL_PROTOCOL,
+                "kind=" + r9.failureKind);
+        check("6800 后提前停止盲试", stopped, "");
+        check("APDU 条数 ≤12（原 33）", r9.apduCount <= 12, String.valueOf(r9.apduCount));
+        VirtualCard.breakPace = false;
+
+        System.out.println("=== 7h. BAC 报文结构：SELECT / GET CHALLENGE / EXTERNAL AUTHENTICATE ===");
+        VirtualCard vc8 = new VirtualCard(dir, false);
+        IcaoReader.Result r10 = IcaoReader.read(vc8, m.mrzInfo(), text -> { }, IcaoReader.MODE_AUTO, null);
+        check("读取成功", r10.ok, r10.error);
+        // PACE 优先后，SELECT AID 不再固定是第 1 条（前面有 SELECT MF / SELECT 011C），按内容定位
+        int ai = indexOfCmd(vc8, "00A4040C07A0000002471001");
+        String cCh = ai >= 0 && ai + 1 < vc8.cmds.size() ? Tlv.hex(vc8.cmds.get(ai + 1)) : "";
+        String cExt = ai >= 0 && ai + 2 < vc8.cmds.size() ? Tlv.hex(vc8.cmds.get(ai + 2)) : "";
+        check("存在 SELECT AID（P2=0C）", ai >= 0, "index=" + ai);
+        check("紧接 GET CHALLENGE（Le=8，共 5 字节）", "0084000008".equals(cCh), cCh);
+        check("再紧接 EXTERNAL AUTHENTICATE（Lc=28，40 字节，Le=28，共 46 字节）",
+                cExt.startsWith("0082000028") && cExt.length() == 46 * 2 && cExt.endsWith("28"), cExt);
+        boolean rawLogged = false;
+        String tag = "APDU #" + (ai + 3) + " ← ";
+        for (String l : r10.log) if (l.startsWith(tag) && l.contains("9000")) rawLogged = true;
+        check("日志里有 EXTERNAL AUTH 的原始响应（9000）", rawLogged, "");
+
+        System.out.println("=== 7j. 现场卡形态：芯片要求带 Le 的 EXTERNAL AUTH（第一次就发 46 字节）===");
+        VirtualCard.requireLeForExtAuth = true;
+        VirtualCard vc9 = new VirtualCard(dir, false);
+        IcaoReader.Result r11 = IcaoReader.read(vc9, m.mrzInfo(), text -> { }, IcaoReader.MODE_AUTO, null);
+        for (String l : r11.log) System.out.println("       · " + l);
+        int ai9 = indexOfCmd(vc9, "00A4040C07A0000002471001");
+        boolean firstTry = ai9 >= 0 && ai9 + 2 < vc9.cmds.size() && vc9.cmds.get(ai9 + 2).length == 46;
+        check("读取成功（带 Le 一次通过）", r11.ok, r11.error);
+        check("EXTERNAL AUTH 首次即 46 字节（不浪费挑战）", firstTry,
+                ai9 >= 0 && ai9 + 2 < vc9.cmds.size() ? String.valueOf(vc9.cmds.get(ai9 + 2).length) : "cmds=" + vc9.cmds.size());
+        VirtualCard.requireLeForExtAuth = false;
+
+        System.out.println("=== 7k. 反向芯片：带 Le 回 6700 → 重选应用 + 重新取挑战 + 无 Le 重发 ===");
+        VirtualCard.rejectLeForExtAuth = true;
+        VirtualCard vc10 = new VirtualCard(dir, false);
+        IcaoReader.Result r12 = IcaoReader.read(vc10, m.mrzInfo(), text -> { }, IcaoReader.MODE_AUTO, null);
+        for (String l : r12.log) System.out.println("       · " + l);
+        int ai10 = indexOfCmd(vc10, "00A4040C07A0000002471001");
+        boolean seq = ai10 >= 0 && ai10 + 5 < vc10.cmds.size()
+                && vc10.cmds.get(ai10 + 2).length == 46 && (vc10.cmds.get(ai10 + 2)[1] & 0xFF) == 0x82
+                && (vc10.cmds.get(ai10 + 3)[1] & 0xFF) == 0xA4      // 6700 后重选应用
+                && (vc10.cmds.get(ai10 + 4)[1] & 0xFF) == 0x84      // 重新 GET CHALLENGE
+                && vc10.cmds.get(ai10 + 5).length == 45;            // 再以无 Le 发
+        check("读取成功（换长度后）", r12.ok, r12.error);
+        check("6700 → 重选 → 重取挑战 → 无 Le 重发", seq,
+                ai10 >= 0 && ai10 + 5 < vc10.cmds.size()
+                        ? String.format("%d/%02X/%02X/%d", vc10.cmds.get(ai10 + 2).length,
+                        vc10.cmds.get(ai10 + 3)[1] & 0xFF, vc10.cmds.get(ai10 + 4)[1] & 0xFF,
+                        vc10.cmds.get(ai10 + 5).length)
+                        : "cmds=" + vc10.cmds.size());
+        VirtualCard.rejectLeForExtAuth = false;
+
+        System.out.println("=== 7l. 现场卡形态：nonce 无填充 + PACE 四步 CLA=10/10/10/00 ===");
+        VirtualCard.noPadNonce = true;
+        VirtualCard vc11 = new VirtualCard(dir, true);
+        IcaoReader.Result r13 = IcaoReader.read(vc11, m.mrzInfo(), text -> { }, IcaoReader.MODE_AUTO, null);
+        for (String l : r13.log) System.out.println("       · " + l);
+        int gaN = 0;
+        StringBuilder clas = new StringBuilder();
+        for (byte[] c : vc11.cmds) {
+            if ((c[1] & 0xFF) == 0x86) {
+                gaN++;
+                clas.append(String.format("%02X ", c[0] & 0xFF));
+            }
+        }
+        check("读取成功（16 字节 nonce 不做 unpad）", r13.ok, r13.error);
+        check("GA 四步 CLA = 10 10 10 00", gaN >= 4 && clas.toString().startsWith("10 10 10 00 "), clas.toString());
+        VirtualCard.noPadNonce = false;
+
+        System.out.println("=== 7i. PACE 口令派生 Kπ（§9.7.3 表11）===");
+        Pace.Info aesInfo = Pace.defaultCandidates().get(0);      // AES-128 / brainpoolP384(13)
+        String canKpi = Tlv.hex(Pace.passwordKey(aesInfo, "123456", Pace.PWD_CAN));
+        check("CAN 直接编码（不再 SHA-1）", "591468CDA83D65219CCCB8560233600F".equals(canKpi), canKpi);
+        String mrzKpi = Tlv.hex(Pace.passwordKey(aesInfo, "L898902C<369080619406236", Pace.PWD_MRZ));
+        check("MRZ 先 SHA-1", "7DF6B4716ABD95CC58E7D2559D3600C8".equals(mrzKpi), mrzKpi);
 
         System.out.println("=== 8. 错误 MRZ 应当失败 ===");
         IcaoReader.Result r3 = IcaoReader.read(new VirtualCard(dir, false), "AE0644356291051262707245", text -> { });
@@ -207,7 +387,26 @@ public class NfcTest {
     static final class VirtualCard implements CardSession.Transport {
 
         static String MRZI = "";
+        /** PACE 密码改用 CAN 时（密码参考 0x02）的值；空 = 卡只认 MRZ。 */
+        static String CAN = "";
+        /** true = 复现现场卡形态：MSE:Set AT 回 9000 但 General Authenticate 一律 6800（v2.9 日志 idcard-diag-20261110-143055）。 */
+        static boolean breakPace = false;
+        /** true = 复现现场卡：nonce 密文只有一块（16 字节），不带 ISO9797 填充。 */
+        static boolean noPadNonce = false;
+        /** 现场卡一 SELECT EF.CardAccess 就复位会话——这里记录"有没有碰过"，用于断言 BAC 优先。 */
+        static boolean cardAccessTouched = false;
+        /** true = BAC 的 GET CHALLENGE 直接抛 IOException("Tag was lost.")，复现"通信中断而非芯片拒绝"。 */
+        static boolean failBacTransport = false;
+        /** 是否收到过 SELECT MF（EF.CardAccess 属于主文件，§9.2.11）。 */
+        static boolean mfSelected = false;
+        /** true = EXTERNAL AUTHENTICATE 必须带 Le，否则回 6700（现场卡形态）。 */
+        static boolean requireLeForExtAuth = false;
+        /** true = 反过来：带了 Le 就回 6700（用来验证"换长度必须重新取挑战"）。 */
+        static boolean rejectLeForExtAuth = false;
         static byte[] KSEED = new byte[16];
+        private int pwdRef = 0x01;
+        /** PACE 的安全环境必须在主文件里建立（§4.4）；用来复现"在应用 DF 下 GA 回 6800"。 */
+        private boolean mfActive;
 
         private final Map<Integer, byte[]> files = new HashMap<>();
         private int selectedFid;
@@ -228,13 +427,21 @@ public class NfcTest {
         private final boolean paceOnly;
 
         VirtualCard(String dir, boolean usePace) throws Exception {
+            this(dir, usePace, usePace);
+        }
+
+        /**
+         * @param usePace        支持 PACE（且拒绝 BAC）
+         * @param exposeCardAccess 是否提供 EF.CardAccess；false = 现场那种"被 6982 挡住、只能盲试"的卡
+         */
+        VirtualCard(String dir, boolean usePace, boolean exposeCardAccess) throws Exception {
             this.paceOnly = usePace;
             files.put(0x0101, Files.readAllBytes(Paths.get(dir, "dg1.bin")));
             files.put(0x0102, Files.readAllBytes(Paths.get(dir, "dg2.bin")));
             files.put(0x010B, Files.readAllBytes(Paths.get(dir, "dg11.bin")));
             files.put(0x011D, Files.readAllBytes(Paths.get(dir, "sod.bin")));
             files.put(0x011E, Files.readAllBytes(Paths.get(dir, "com.bin")));
-            if (usePace) {
+            if (usePace && exposeCardAccess) {
                 byte[] info = Tlv.encode(0x30, Crypt.concat(
                         Tlv.encode(0x06, paceOid),
                         Tlv.encode(0x02, new byte[]{0x02}),
@@ -254,7 +461,11 @@ public class NfcTest {
             }
         }
 
+        /** 收到的原始 C-APDU（只记前 10 条），用来断言 BAC 的报文结构。 */
+        final List<byte[]> cmds = new ArrayList<>();
+
         @Override public byte[] transceive(byte[] cmd) throws Exception {
+            if (cmds.size() < 10) cmds.add(cmd.clone());
             if (sm != null) return sm.handle(cmd);
             Cmd c = Cmd.parse(cmd);
             Resp r = business(c);
@@ -288,9 +499,11 @@ public class NfcTest {
         private Resp business(Cmd c) throws Exception {
             switch (c.ins) {
                 case 0xA4:
-                    if (c.p1 == 0x04) return new Resp(new byte[0], 0x9000);
+                    if (c.p1 == 0x00) { mfSelected = true; mfActive = true; return new Resp(new byte[0], 0x9000); }   // SELECT MF
+                    if (c.p1 == 0x04) { mfActive = false; return new Resp(new byte[0], 0x9000); }
                     if (c.p1 == 0x02) {
                         int fid = ((c.data[0] & 0xFF) << 8) | (c.data[1] & 0xFF);
+                        if (fid == 0x011C) cardAccessTouched = true;
                         selectedFid = fid;
                         return new Resp(new byte[0], files.containsKey(fid) ? 0x9000 : 0x6A82);
                     }
@@ -307,6 +520,7 @@ public class NfcTest {
                     return new Resp(out, 0x9000);
                 }
                 case 0x84:
+                    if (failBacTransport) throw new java.io.IOException("Tag was lost.");
                     // 只支持 PACE 的卡（usePace=true）不给 BAC 挑战：这样测试 7 才能真正验证
                     // 「BAC 先试 → 被拒 → 读 EF.CardAccess → 走 PACE」这条回退链路
                     if (paceOnly) return new Resp(new byte[0], 0x6A81);
@@ -314,6 +528,13 @@ public class NfcTest {
                     return new Resp(rndIc, 0x9000);
                 case 0x82:
                     if (paceOnly) return new Resp(new byte[0], 0x6A81);
+                    // 两种现场形态：
+                    //   requireLeForExtAuth：不带 Le 回 6700（老做法）
+                    //   rejectLeForExtAuth ：带了 Le 回 6700（反过来的芯片）
+                    // 关键：6700 之后原挑战作废（真实芯片回 6985），逼着实现重新 GET CHALLENGE
+                    if (requireLeForExtAuth && c.le == null) { rndIc = null; return new Resp(new byte[0], 0x6700); }
+                    if (rejectLeForExtAuth && c.le != null) { rndIc = null; return new Resp(new byte[0], 0x6700); }
+                    if (rndIc == null) return new Resp(new byte[0], 0x6985);
                     return bacExternalAuth(c.data);
                 case 0x22:
                     return paceMse(c.data);
@@ -330,14 +551,14 @@ public class NfcTest {
             System.arraycopy(data, 32, mifd, 0, 8);
             byte[] kEncL = Crypt.kdf(KSEED, 1, false, 112);
             byte[] kMacL = Crypt.kdf(KSEED, 2, false, 112);
-            if (!java.util.Arrays.equals(Crypt.retailMac(kMacL, eifd), mifd)) return new Resp(new byte[0], 0x6300);
+            if (!java.util.Arrays.equals(Crypt.retailMac(kMacL, Crypt.pad(eifd, 8)), mifd)) return new Resp(new byte[0], 0x6300);
             byte[] dec = Crypt.desCbc(kEncL, new byte[8], eifd, false);
             rndIfd = slice(dec, 0, 8);
             byte[] icEcho = slice(dec, 8, 8);
             kIfd = slice(dec, 16, 16);
             byte[] kIc = Crypt.random(16);
             byte[] enc = Crypt.desCbc(kEncL, new byte[8], Crypt.concat(icEcho, rndIfd, kIc), true);
-            byte[] mac = Crypt.retailMac(kMacL, enc);
+            byte[] mac = Crypt.retailMac(kMacL, Crypt.pad(enc, 8));
             byte[] seed2 = Crypt.concat(kIfd, kIc);
             kEncBac = Crypt.kdf(seed2, 1, false, 112);
             kMacBac = Crypt.kdf(seed2, 2, false, 112);
@@ -346,24 +567,40 @@ public class NfcTest {
         }
 
         private Resp paceMse(byte[] data) {
+            // 现场卡：不在主文件下做 PACE 就是 MSE 9000、GA 6800。这里同样表态，
+            // 让"读完 CardAccess 又选回应用 DF"的回归立刻暴露。
+            if (!mfActive) return new Resp(new byte[0], 0x6800);
             curve = EcCurve.byId(paceParamId);
             for (Tlv t : Tlv.parse(data)) {
+                if (t.tag == 0x83 && t.value.length > 0) {
+                    pwdRef = t.value[0] & 0xFF;          // 0x01=MRZ, 0x02=CAN
+                }
                 if (t.tag == 0x84 && t.value.length > 0) {
                     paceParamId = t.value[0] & 0xFF;
                     curve = EcCurve.byId(paceParamId);
                 }
             }
             if (curve == null) return new Resp(new byte[0], 0x6A86);
+            if (pwdRef == 0x02 && CAN.isEmpty()) return new Resp(new byte[0], 0x6A88);   // 卡要求 CAN，但没给
+            if (!CAN.isEmpty() && pwdRef != 0x02) return new Resp(new byte[0], 0x6A88); // 卡只认 CAN
             paceStarted = true;
             return new Resp(new byte[0], 0x9000);
         }
 
         private Resp paceGeneralAuth(byte[] data) throws Exception {
+            if (breakPace) return new Resp(new byte[0], 0x6800);   // 现场：Get Nonce 阶段就被拒
             if (!paceStarted || curve == null) return new Resp(new byte[0], 0x6985);
             if (data.length == 2 && data[0] == 0x7C && data[1] == 0x00) {
                 nonce = new BigInteger(1, Crypt.random(16)).mod(curve.n);
-                byte[] kPi = Crypt.kdf(Crypt.sha1(MRZI.getBytes("US-ASCII")), 3, true, 128);
-                byte[] enc = Crypt.aesCbc(kPi, new byte[16], Crypt.pad(Ec.fill(nonce, 16), 16), true);
+                String pwd = pwdRef == 0x02 ? CAN : MRZI;
+                // §9.7.3 表11：CAN 直接按 ISO/IEC 8859-1 编码，MRZ 才先 SHA-1
+                byte[] kInput = pwdRef == 0x02
+                        ? pwd.getBytes("ISO-8859-1")
+                        : Crypt.sha1(pwd.getBytes("US-ASCII"));
+                byte[] kPi = Crypt.kdf(kInput, 3, true, 128);
+                byte[] s16 = Ec.fill(nonce, 16);
+                // noPadNonce：现场卡只回一块密文（16 字节），没有 ISO9797 填充
+                byte[] enc = Crypt.aesCbc(kPi, new byte[16], noPadNonce ? s16 : Crypt.pad(s16, 16), true);
                 return new Resp(Tlv.encode(0x7C, Tlv.encode(0x80, enc)), 0x9000);
             }
             byte[] p81 = Pace.dynAuth(data, 0x81);
@@ -437,8 +674,9 @@ public class NfcTest {
             }
 
             byte[] mac(byte[] d) {
-                byte[] padded = Crypt.pad(d, block);
-                return aes ? Crypt.aesCmac(ksMac, padded, 8) : Crypt.retailMac(ksMac, padded);
+                // 与产品代码保持一致：AES-CMAC 用自己的 10* 填充，不能预补 0x80 块
+                if (aes) return Crypt.aesCmac(ksMac, d, 8);
+                return Crypt.retailMac(ksMac, Crypt.pad(d, block));
             }
 
             byte[] cbc(byte[] d, boolean enc) {
