@@ -36,6 +36,8 @@ public final class IcaoReader {
         public final DocData doc = new DocData();
         public final Map<Integer, byte[]> dgs = new LinkedHashMap<>();
         public PassiveAuth.Result sod;
+        /** 主动认证（DG15 + INTERNAL AUTHENTICATE）：证明芯片本体不是复制品。 */
+        public ActiveAuth.Result aa;
         public final List<String> log = new ArrayList<>();
         public int apduCount;
         public long ms;
@@ -266,7 +268,8 @@ public final class IcaoReader {
             List<Integer> want = new ArrayList<>();
             if (!res.doc.dgList.isEmpty()) {
                 for (Integer dg : res.doc.dgList) {
-                    if (dg == 1 || dg == 2 || dg == 11) want.add(dg);
+                    // 15 是主动认证公钥（AA），多读一个几百字节的文件换"防克隆"能力，很划算
+                    if (dg == 1 || dg == 2 || dg == 11 || dg == 15) want.add(dg);
                 }
             } else {
                 want.add(1);
@@ -303,6 +306,17 @@ public final class IcaoReader {
             }
             res.sod = PassiveAuth.verify(sod, res.dgs);
             for (String d : res.sod.details) res.log.add("SOD：" + d);
+
+            // ---- DG15 存在时做主动认证（§5.3）：随机挑战 + 芯片内部私钥签名。
+            //      放在 SOD 之后是因为它失败也不影响已读到的数据；芯片没声明 DG15 就完全不发命令。
+            if (res.dgs.containsKey(15)) {
+                step(progress, res, "主动认证（AA）…");
+                res.aa = ActiveAuth.run(session, res.dgs.get(15));
+                res.log.add("AA：" + res.aa.summary());
+                for (String d : res.aa.details) res.log.add("AA：" + d);
+            } else {
+                res.log.add("AA：芯片未声明 DG15，跳过（该证件不支持防克隆认证）");
+            }
 
             res.ok = res.doc.mrz != null || res.doc.faceImage != null;
             if (!res.ok) res.error = "已建立安全通道，但没有读到 DG1/DG2（可能是卡片未按 ICAO 组织数据）";

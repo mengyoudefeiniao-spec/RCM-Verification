@@ -732,10 +732,27 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                     .append(r.sod.dgHashesOk ? " ✓" : " ✗")
                     .append(r.sod.dgMissing > 0 ? "（另有 " + r.sod.dgMissing + " 组未读取）" : "")
                     .append('\n');
-            sb.append("证书链自洽：").append(r.sod.chainOk ? "✓（未锚定 CSCA）" : "— 未找到签发者").append('\n');
+            sb.append("证书链自洽：").append(r.sod.chainOk ? "✓" : "— 未找到签发者").append('\n');
+            // 锚定与否要和"自洽"分开说：自洽只代表 SOD 内部没矛盾，能说"谁签发"必须有 CSCA 库
+            if (r.sod.cscaTrusted) {
+                sb.append("CSCA 锚定：✓ 已锚定 C=")
+                        .append(r.sod.cscaCountry.isEmpty() ? "??" : r.sod.cscaCountry)
+                        .append("（库内 ").append(r.sod.cscaStoreSize).append(" 张）").append('\n');
+            } else {
+                sb.append("CSCA 锚定：— 未收录（库内 ").append(r.sod.cscaStoreSize)
+                        .append(" 张，只能证明自洽，不能判定签发国）").append('\n');
+            }
             sb.append("证书有效期：").append(r.sod.certValidOk ? "✓" : "✗").append('\n');
             sb.append("摘要算法：").append(r.sod.hashAlg).append('\n');
             if (!r.sod.dsSubject.isEmpty()) sb.append("签名证书：").append(r.sod.dsSubject).append('\n');
+        }
+        if (r.aa != null) {
+            sb.append("\n【主动认证（AA · 防克隆）】\n");
+            sb.append(r.aa.ok ? "✓ 通过" : "✗ 未通过");
+            if (!r.aa.algorithm.isEmpty()) sb.append(" · ").append(r.aa.algorithm);
+            if (r.aa.keyBits > 0) sb.append(" · ").append(r.aa.keyType).append(' ').append(r.aa.keyBits).append(" 位");
+            sb.append('\n');
+            if (!r.aa.ok && !r.aa.error.isEmpty()) sb.append("原因：").append(r.aa.error).append('\n');
         }
         nfcTv.setText(sb.toString());
 
@@ -846,7 +863,20 @@ public class IdCardActivity extends Activity implements CameraController.FrameLi
                         sod.put("chainOk", r.sod.chainOk);
                         sod.put("certValidOk", r.sod.certValidOk);
                         sod.put("hashAlg", r.sod.hashAlg == null ? "" : r.sod.hashAlg);
+                        sod.put("cscaTrusted", r.sod.cscaTrusted);
+                        sod.put("cscaCountry", r.sod.cscaCountry);
+                        sod.put("cscaStoreSize", r.sod.cscaStoreSize);
                         o.put("sod", sod);
+                    }
+                    if (r.aa != null) {
+                        org.json.JSONObject aa = new org.json.JSONObject();
+                        aa.put("attempted", r.aa.attempted);
+                        aa.put("ok", r.aa.ok);
+                        aa.put("algorithm", r.aa.algorithm);
+                        aa.put("keyType", r.aa.keyType);
+                        aa.put("keyBits", r.aa.keyBits);
+                        aa.put("error", r.aa.error);
+                        o.put("aa", aa);
                     }
                     org.json.JSONObject cmp = new org.json.JSONObject();
                     if (docMatch != null) cmp.put("docMatch", docMatch.booleanValue());

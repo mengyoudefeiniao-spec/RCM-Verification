@@ -1,4 +1,6 @@
+import iq.digitalration.faceverify.card.ActiveAuth;
 import iq.digitalration.faceverify.card.CardSession;
+import iq.digitalration.faceverify.card.Csca;
 import iq.digitalration.faceverify.card.Crypt;
 import iq.digitalration.faceverify.card.Ec;
 import iq.digitalration.faceverify.card.EcCurve;
@@ -39,6 +41,35 @@ public class NfcTest {
             if (Tlv.hex(vc.cmds.get(i)).equals(hex)) return i;
         }
         return -1;
+    }
+
+    /** 测试辅助：用私钥签一段数据（模拟芯片内部私钥）。 */
+    static byte[] sign(java.security.PrivateKey key, String alg, byte[] data) throws Exception {
+        java.security.Signature s = java.security.Signature.getInstance(alg);
+        s.initSign(key);
+        s.update(data);
+        return s.sign();
+    }
+
+    /** 测试辅助：从 SOD 的 certs 里挑出自我签发的 CSCA（fixture 里 DS 由它签发）。 */
+    static java.security.cert.X509Certificate cscaFromSod(byte[] sod) throws Exception {
+        Tlv root = null;
+        for (Tlv t : Tlv.parse(sod)) if (t.tag == 0x77) root = t;
+        if (root == null) return null;
+        Tlv sd = null;
+        for (Tlv t : Tlv.parse(root.value)) if (t.tag == 0x30) { sd = t; break; }
+        if (sd == null) return null;
+        Tlv certs = null;
+        for (Tlv c : sd.children()) if (c.tag == 0xA0) certs = c;
+        if (certs == null) return null;
+        java.security.cert.CertificateFactory cf = java.security.cert.CertificateFactory.getInstance("X.509");
+        for (Tlv c : certs.children()) {
+            if (c.tag != 0x30) continue;
+            java.security.cert.X509Certificate x = (java.security.cert.X509Certificate)
+                    cf.generateCertificate(new java.io.ByteArrayInputStream(c.raw));
+            if (x.getSubjectX500Principal().equals(x.getIssuerX500Principal())) return x;
+        }
+        return null;
     }
 
     static void check(String name, boolean ok, String detail) {
@@ -199,6 +230,7 @@ public class NfcTest {
         check("被动认证", r1.sod != null && r1.sod.signatureOk && r1.sod.dgHashesOk,
                 r1.sod == null ? "null" : r1.sod.summary());
         check("EF.COM 数据组", r1.doc.dgList.size() == 3, String.valueOf(r1.doc.dgList));
+        check("芯片未声明 DG15 → 不做 AA", r1.aa == null, "aa=" + r1.aa);
 
         System.out.println("=== 4c. 真实卡（伊拉克国民卡）MRZ → BAC 密钥 ===");
         Mrz m4 = Mrz.parse("IDIRQAC67648836197662080255<<<"
@@ -363,6 +395,51 @@ public class NfcTest {
         System.out.println("=== 8. 错误 MRZ 应当失败 ===");
         IcaoReader.Result r3 = IcaoReader.read(new VirtualCard(dir, false), "AE0644356291051262707245", text -> { });
         check("错误 MRZ 被拒绝", !r3.ok && r3.error != null, r3.error);
+
+        System.out.println("=== 9. 主动认证（DG15/AA）与 CSCA 锚定 ===");
+        // 9a. AA 验签：芯片用内部私钥签随机挑战，RSA(SHA-1/SHA-256) 与 ECDSA 都要支持
+        java.security.KeyPairGenerator rsaGen = java.security.KeyPairGenerator.getInstance("RSA");
+        rsaGen.initialize(2048);
+        java.security.KeyPair rsa = rsaGen.generateKeyPair();
+        byte[] chal = new byte[]{1, 2, 3, 4, 5, 6, 7, 8};
+        byte[] sig1 = sign(rsa.getPrivate(), "SHA1withRSA", chal);
+        check("AA RSA-SHA1 验签", "SHA1withRSA".equals(ActiveAuth.verifySignature(rsa.getPublic(), chal, sig1)), "");
+        byte[] sig256 = sign(rsa.getPrivate(), "SHA256withRSA", chal);
+        check("AA RSA-SHA256 验签", "SHA256withRSA".equals(ActiveAuth.verifySignature(rsa.getPublic(), chal, sig256)), "");
+        byte[] badSig = sig1.clone();
+        badSig[0] ^= 0x01;
+        check("AA 篡改签名被拒", ActiveAuth.verifySignature(rsa.getPublic(), chal, badSig) == null, "");
+        check("AA 换挑战被拒（防重放）",
+                ActiveAuth.verifySignature(rsa.getPublic(), new byte[]{8, 7, 6, 5, 4, 3, 2, 1}, sig1) == null, "");
+
+        // 9b. DG15 结构：6F { 30 SubjectPublicKeyInfo }
+        // 真实 DG15 = 6F { SubjectPublicKeyInfo }，SPKI 自己就以 0x30 开头（不要再包一层 0x30）
+        byte[] dg15 = Tlv.encode(0x6F, rsa.getPublic().getEncoded());
+        byte[] spki = ActiveAuth.spkiOf(dg15);
+        check("DG15 → SPKI", spki != null && java.util.Arrays.equals(spki, rsa.getPublic().getEncoded()),
+                spki == null ? "null" : (spki.length + " 字节"));
+        check("DG15 → 公钥可解析", ActiveAuth.publicKey(spki) != null, "");
+        ActiveAuth.Result aaNoKey = ActiveAuth.run(
+                new CardSession(new VirtualCard(dir, false)), null);
+        check("DG15 为空时 AA 不抛异常、如实报未通过",
+                aaNoKey.attempted && !aaNoKey.ok && !aaNoKey.error.isEmpty(), aaNoKey.summary());
+
+        // 9c. CSCA：空库只能说"未收录"，装入 fixture 里的 CSCA 之后才允许说"由 IQ 签发"
+        Csca.clear();
+        PassiveAuth.Result prEmpty = PassiveAuth.verify(sod, dgs);
+        check("CSCA 空库 → 未收录", !prEmpty.cscaTrusted && prEmpty.cscaStoreSize == 0, prEmpty.cscaReason);
+        check("空库时 summary 写明未收录", prEmpty.summary().contains("CSCA 未收录"), prEmpty.summary());
+
+        java.security.cert.X509Certificate fixtureCsca = cscaFromSod(sod);
+        check("SOD 里能取到自签 CSCA", fixtureCsca != null, "");
+        Csca.add(fixtureCsca);
+        PassiveAuth.Result prAnchor = PassiveAuth.verify(sod, dgs);
+        for (String d : prAnchor.details) System.out.println("       · " + d);
+        check("CSCA 装入后锚定", prAnchor.cscaTrusted, prAnchor.cscaReason);
+        check("CSCA 国别取自证书 C=IQ", "IQ".equals(prAnchor.cscaCountry), prAnchor.cscaCountry);
+        check("锚定后 summary 标记", prAnchor.summary().contains("CSCA 已锚定(IQ)"), prAnchor.summary());
+        Csca.clear();
+        check("Csca.clear() 后回到未收录", Csca.size() == 0, String.valueOf(Csca.size()));
 
         System.out.println();
         System.out.println(fail == 0 ? "NFC TESTS PASSED (" + pass + ")" : "NFC TESTS FAILED: " + fail + "/" + (pass + fail));

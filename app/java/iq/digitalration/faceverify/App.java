@@ -45,6 +45,29 @@ public class App extends Application {
         super.onCreate();
         I = this;
         installCrashLogger();
+        loadCsca();
+    }
+
+    /**
+     * 装入 CSCA 信任锚：把 ICAO PKD MasterList 导出的 PEM（或边检下发的证书包）丢进
+     * assets/csca/ 即可，支持多张串在一个文件里。没有文件时库为空，界面如实显示"CSCA 未收录"，
+     * 只做"自洽"判定——绝不把自签名当成可信签发。
+     */
+    private void loadCsca() {
+        try {
+            android.content.res.AssetManager am = getAssets();
+            String[] files = am.list("csca");
+            if (files == null || files.length == 0) return;
+            int n = 0;
+            for (String f : files) {
+                String lower = f.toLowerCase(java.util.Locale.US);
+                if (!(lower.endsWith(".pem") || lower.endsWith(".cer") || lower.endsWith(".crt"))) continue;
+                n += iq.digitalration.faceverify.card.Csca.loadPem(am.open("csca/" + f));
+            }
+            if (n > 0) Log.i(TAG, "CSCA 库装入 " + n + " 张证书");
+        } catch (Throwable t) {
+            Log.w(TAG, "CSCA 装载失败：" + t.getMessage());
+        }
     }
 
     /** 没有 USB 时抓不到 logcat，把未捕获异常写到 filesDir/last_crash.txt 供界面显示。 */

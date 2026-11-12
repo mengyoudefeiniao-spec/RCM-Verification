@@ -35,6 +35,13 @@ public final class PassiveAuth {
         public String hashAlg = "";
         public String dsSubject = "";
         public String dsIssuer = "";
+        /** DS 的签发者（CSCA）是否命中本地受信库；只有 true 才能说"由 C=XX 签发"。 */
+        public boolean cscaTrusted;
+        /** 签发国两字母代码（CSCA 证书 Subject 的 C=）。 */
+        public String cscaCountry = "";
+        public String cscaSubject = "";
+        public String cscaReason = "";
+        public int cscaStoreSize;
         public int dgMatched, dgVerified, dgDeclared, dgMissing;
         public final List<String> details = new ArrayList<>();
         public String error;
@@ -46,7 +53,10 @@ public final class PassiveAuth {
             if (!sodParsed) return "SOD 解析失败" + (error == null ? "" : "：" + error);
             return (signatureOk ? "SOD 签名有效" : "SOD 签名无效")
                     + " · 数据组哈希 " + dgMatched + "/" + dgVerified
-                    + (chainOk ? " · 证书链自洽" : " · 证书链未锚定")
+                    + (chainOk ? " · 证书链自洽" : " · 证书链断裂")
+                    + (cscaTrusted
+                        ? " · CSCA 已锚定(" + (cscaCountry.isEmpty() ? "?" : cscaCountry) + ")"
+                        : " · CSCA 未收录")
                     + (certValidOk ? " · 证书在有效期内" : " · 证书有效期异常");
         }
     }
@@ -253,8 +263,20 @@ public final class PassiveAuth {
             try {
                 signerCert.verify(dsca.getPublicKey());
                 r.chainOk = true;
-                r.details.add("证书链自洽：DS ← " + shorten(dsca.getSubjectX500Principal().getName())
-                        + "（未与 CSCA 主列表比对，不能据此判定签发国）");
+                // 链自洽只说明"SOD 内部没矛盾"；能不能说"由某国签发"取决于 CSCA 是否受信。
+                Csca.Verdict v = Csca.verify(dsca);
+                r.cscaTrusted = v.trusted;
+                r.cscaCountry = v.country;
+                r.cscaReason = v.reason;
+                r.cscaStoreSize = v.storeSize;
+                r.cscaSubject = shorten(dsca.getSubjectX500Principal().getName());
+                if (v.trusted) {
+                    r.details.add("CSCA 已锚定：C=" + (v.country.isEmpty() ? "??" : v.country)
+                            + " · " + r.cscaSubject + "（" + v.reason + "）");
+                } else {
+                    r.details.add("证书链自洽：DS ← " + r.cscaSubject + "，但 CSCA 未收录（"
+                            + v.reason + "），不能据此判定签发国");
+                }
                 break;
             } catch (Exception ignored) {
             }
